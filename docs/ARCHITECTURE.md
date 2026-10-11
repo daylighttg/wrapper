@@ -1,6 +1,6 @@
 # Architecture
 
-wrapper-lite is being restructured so that a single Rust binary, `wrapper`,
+wrapper-lite was restructured so that a single Rust binary, `wrapper`,
 replaces the old C launchers (`wrapper-lite.c`, `wrapper-lite-rootless.c`),
 the C++ QEMU launcher (`wrapper-lite-qemu.cpp`) and the Go GUI, and so that one
 installation can serve **multiple Apple Music accounts** (the feature set of
@@ -30,7 +30,9 @@ host (Windows / macOS / Linux / Android)        QEMU guest, or Linux natively
    starts `wrapper agent`.
 3. **Web GUI** — `wrapper gui` (default command) serves the Vite + Svelte
    panel from `web/`, runs the engine and proxies the agent API.
-4. CI, thin Android shell, removal of the C/C++/Go launchers.
+4. **CI, Android, cleanup** — new workflow (Rust checks, web, lite, guest
+   with a native-sandbox smoke test, desktop/Android packages, APK), thin
+   Android shell, Docker on the native agent, old launchers and GUI removed.
 
 ## Crates
 
@@ -177,6 +179,31 @@ browser ──▶ wrapper gui (127.0.0.1:12341)
 | GET | `/api/host/console` | QEMU / agent console lines |
 | GET | `/api/host/events` | SSE: `console`, `status`, `download` |
 | POST | `/api/host/package/download` | download and install the platform package |
+
+## Android
+
+The APK is a thin Kotlin shell around the same binary, built for
+`aarch64-linux-android` and shipped as `jniLibs/arm64-v8a/libwrapper.so` (so
+it is extracted to the executable native library dir):
+
+* `WrapperService` (foreground service, wake + Wi-Fi locks) unpacks the
+  bundled Termux QEMU and guest files to `filesDir/qemu` once per APK version,
+  then runs `libwrapper.so gui --data-dir filesDir --assets-dir filesDir/qemu
+  --access-token <random>` and restarts it if it dies.
+* `MainActivity` is a WebView on the panel URL that wrapper prints.
+* `targetSdk` stays 28 so QEMU can be executed from `filesDir`.
+
+## Packages
+
+| Artifact | Contents |
+|---|---|
+| `wrapper-<os>-<arch>` | `wrapper(.exe)`, `qemu/` (kernel, initramfs, bundled QEMU in `qemu/bin`); linux-x86_64 also `rootfs/` for the native engine |
+| `wrapper-android-aarch64` | Android `wrapper` + Termux QEMU, for Termux |
+| `wrapper-android-apk` | the APK |
+
+The GUI's "download package" fetches `wrapper-<os>-<arch>.zip` and installs
+it next to `qemu/`, skipping the running executable, `qemu/data.img` and
+`rootfs/data/`.
 
 ### wrapper-manager compatibility
 

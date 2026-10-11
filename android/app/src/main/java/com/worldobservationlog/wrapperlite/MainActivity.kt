@@ -1,216 +1,103 @@
 package com.worldobservationlog.wrapperlite
 
-import android.Manifest
-import android.content.ComponentName
-import android.content.Context
+import android.annotation.SuppressLint
 import android.content.Intent
-import android.content.ServiceConnection
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.IBinder
-import android.os.Looper
-import android.webkit.JsResult
+import android.view.Gravity
+import android.view.View
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.appcompat.app.AlertDialog
+import android.widget.FrameLayout
+import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
-import java.util.Collections
 
+/** Shows wrapper's web panel; the service keeps wrapper itself running. */
 class MainActivity : AppCompatActivity() {
 
+    private val scope = MainScope()
     private lateinit var webView: WebView
-    private var qemuService: QemuService? = null
-    private var isBound = false
+    private lateinit var status: TextView
+    private var loadedUrl: String? = null
 
-    private val logBuffer = Collections.synchronizedList(mutableListOf<String>())
-    private val logHandler = Handler(Looper.getMainLooper())
-    @Volatile
-    private var isFlushScheduled = false
-
-    private val flushLogRunnable = Runnable {
-        flushLogs()
-    }
-
-    private fun queueLog(line: String) {
-        if (line.contains("request: GET /status")) return
-        logBuffer.add(line)
-        if (!isFlushScheduled) {
-            isFlushScheduled = true
-            logHandler.postDelayed(flushLogRunnable, 80)
-        }
-    }
-
-    private fun flushLogs() {
-        isFlushScheduled = false
-        val batch = mutableListOf<String>()
-        synchronized(logBuffer) {
-            if (logBuffer.isNotEmpty()) {
-                batch.addAll(logBuffer)
-                logBuffer.clear()
-            }
-        }
-        if (batch.isEmpty() || isFinishing || isDestroyed) return
-
-        val jsonArray = JSONArray(batch).toString()
-        val js = "if (window.onAndroidLogBatch) { window.onAndroidLogBatch($jsonArray); } else { $jsonArray.forEach(function(l){ window.onAndroidLogEntry(l); }); }"
-        webView.evaluateJavascript(js, null)
-    }
-
-    private val connection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            val binder = service as QemuService.LocalBinder
-            qemuService = binder.getService()
-            isBound = true
-
-            // Attach listeners with log batching
-            qemuService?.onLogListener = { line ->
-                queueLog(line)
-            }
-
-            qemuService?.onStatusListener = { running ->
-                runOnUiThread {
-                    val status = JSONObject().apply {
-                        put("running", running)
-                    }
-                    webView.evaluateJavascript("window.onAndroidStatusUpdate('$status')", null)
-                }
-            }
-
-            // Extract bundled assets if present
-            CoroutineScope(Dispatchers.IO).launch {
-                qemuService?.assetManager?.extractBundledAssetsIfNeeded()
-                runOnUiThread {
-                    if (!isFinishing && !isDestroyed) {
-                        webView.evaluateJavascript("if (typeof checkQemuPackageStatus === 'function') { checkQemuPackageStatus(); }", null)
-                    }
-                }
-            }
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            qemuService = null
-            isBound = false
-        }
-    }
-
+    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Request notification permission on Android 13+
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
-            }
-        }
-
-        // Start & Bind QemuService
-        val serviceIntent = Intent(this, QemuService::class.java)
-        startService(serviceIntent)
-        bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
-
-        // Set up WebView
-        webView = WebView(this)
-        setContentView(webView)
-
-        val settings: WebSettings = webView.settings
-        settings.javaScriptEnabled = true
-        settings.domStorageEnabled = true
-        settings.allowFileAccess = true
-        settings.allowContentAccess = true
-        settings.allowFileAccessFromFileURLs = true
-        settings.allowUniversalAccessFromFileURLs = true
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-        }
-        settings.loadWithOverviewMode = true
-        settings.useWideViewPort = true
-        settings.cacheMode = WebSettings.LOAD_DEFAULT
-
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                // Initialize Android mode in UI and check QEMU status
-                webView.evaluateJavascript("detectPlatform(); if (typeof checkQemuPackageStatus === 'function') { checkQemuPackageStatus(); }", null)
-            }
-        }
-
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
-                if (isFinishing || isDestroyed) {
-                    result?.cancel()
-                    return true
+        webView = WebView(this).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
+            // Plain WebChromeClient enables confirm()/alert() dialogs.
+            webChromeClient = WebChromeClient()
+            webViewClient = object : WebViewClient() {
+                override fun onReceivedError(
+                    view: WebView,
+                    request: android.webkit.WebResourceRequest,
+                    error: android.webkit.WebResourceError,
+                ) {
+                    // wrapper is (re)starting; the URL flow reloads us.
+                    if (request.isForMainFrame) loadedUrl = null
                 }
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle(R.string.app_name)
-                    .setMessage(message ?: "")
-                    .setPositiveButton(android.R.string.ok) { _, _ -> result?.confirm() }
-                    .setOnCancelListener { result?.confirm() }
-                    .show()
-                return true
             }
-
-            override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
-                if (isFinishing || isDestroyed) {
-                    result?.cancel()
-                    return true
-                }
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle(R.string.app_name)
-                    .setMessage(message ?: "")
-                    .setPositiveButton(android.R.string.ok) { _, _ -> result?.confirm() }
-                    .setNegativeButton(android.R.string.cancel) { _, _ -> result?.cancel() }
-                    .setOnCancelListener { result?.cancel() }
-                    .show()
-                return true
-            }
+            visibility = View.INVISIBLE
         }
+        status = TextView(this).apply {
+            text = getString(R.string.status_starting)
+            gravity = Gravity.CENTER
+            textSize = 16f
+            // The window background is always dark (see styles.xml).
+            setTextColor(0xFFECECF1.toInt())
+            setPadding(48, 48, 48, 48)
+        }
+        setContentView(FrameLayout(this).apply {
+            addView(webView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            addView(status, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        })
 
-        val bridge = WebAppInterface(
-            context = this,
-            serviceProvider = { qemuService },
-            evaluateJs = { js ->
-                runOnUiThread {
-                    try {
-                        if (!isFinishing && !isDestroyed) {
-                            webView.evaluateJavascript(js, null)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (webView.canGoBack()) webView.goBack() else moveTaskToBack(true)
+            }
+        })
+
+        ContextCompat.startForegroundService(this, Intent(this, WrapperService::class.java))
+
+        scope.launch {
+            WrapperService.panelUrl.combine(WrapperService.error) { url, err -> url to err }.collect { (url, err) ->
+                when {
+                    url != null -> {
+                        status.visibility = View.GONE
+                        webView.visibility = View.VISIBLE
+                        if (url != loadedUrl) {
+                            loadedUrl = url
+                            webView.loadUrl(url)
                         }
-                    } catch (e: Throwable) {
-                        android.util.Log.e("MainActivity", "Failed to evaluate JS", e)
+                    }
+                    err != null -> {
+                        status.text = err
+                        status.visibility = View.VISIBLE
+                    }
+                    else -> {
+                        status.text = getString(R.string.status_starting)
+                        status.visibility = View.VISIBLE
+                        webView.visibility = View.INVISIBLE
                     }
                 }
             }
-        )
-        webView.addJavascriptInterface(bridge, "Android")
-
-        webView.loadUrl("file:///android_asset/web/index.html")
-    }
-
-    override fun onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            super.onBackPressed()
         }
     }
 
     override fun onDestroy() {
-        logHandler.removeCallbacks(flushLogRunnable)
-        if (isBound) {
-            unbindService(connection)
-            isBound = false
-        }
+        scope.cancel()
+        webView.destroy()
         super.onDestroy()
     }
 }

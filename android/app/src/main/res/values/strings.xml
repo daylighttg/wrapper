@@ -1,7 +1,12 @@
 <resources>
-    <string name="app_name">wrapper-lite</string>
-    <string name="notification_channel_name">wrapper-lite Service</string>
-    <string name="notification_channel_desc">Shows status of the running QEMU guest</string>
-    <string name="service_running">wrapper-lite service is active on port 12340</string>
+    <string name="app_name">wrapper</string>
+    <string name="notification_channel_name">wrapper service</string>
+    <string name="notification_channel_desc">Keeps wrapper and its QEMU guest running</string>
     <string name="action_stop">Stop</string>
+    <string name="status_starting">Starting wrapper…</string>
+    <string name="status_running">Running · open to manage</string>
+    <string name="status_restarting">wrapper stopped unexpectedly, restarting…</string>
+    <string name="status_stopping">Stopping…</string>
+    <string name="error_extract">Could not unpack the bundled QEMU files. Free some storage and restart the app.</string>
+    <string name="error_binary">This APK does not contain the wrapper binary for this device.</string>
 </resources>

@@ -328,6 +328,10 @@ impl Agent {
     /// starts every enabled account.
     pub async fn boot(self: &Arc<Self>) {
         let layout = self.layout().clone();
+        // Android app data dir expected by the Apple libraries (ANDROID_DATA=/data).
+        if let Err(e) = std::fs::create_dir_all(layout.state_dir.join("data/com.apple.android.music")) {
+            tracing::warn!("cannot create {}: {e}", layout.state_dir.display());
+        }
         let mut records = layout.load();
         if records.is_empty() {
             match layout.migrate_legacy(now_millis()) {

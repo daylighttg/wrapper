@@ -283,7 +283,10 @@ async fn download(State(g): State<AppState>) -> Response {
     if g.downloading.swap(true, Ordering::SeqCst) {
         return fail(StatusCode::CONFLICT, "a download is already running");
     }
-    let dest = crate::exe_dir();
+    // Packages contain `qemu/...`: install next to the assets dir (the exe
+    // dir on desktops; the app's files dir on Android, where the exe dir is
+    // read-only).
+    let dest = g.opts.paths.assets_dir.parent().map(PathBuf::from).unwrap_or_else(crate::exe_dir);
     let gui = g.clone();
     let task_url = url.clone();
     tokio::spawn(async move {

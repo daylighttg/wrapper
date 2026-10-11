@@ -3,302 +3,267 @@ name: build-lite
 on:
   push:
     branches: [ lite ]
+  pull_request:
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+  NDK_DIR: android-ndk-r23b
+
 jobs:
-  build-wrapper-lite:
-    name: Build wrapper-lite (Linux)
+  check:
+    name: Rust checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-22.04, windows-2022 ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  web:
+    name: Build web panel
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: web
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: web/dist
 
-      - name: Install host build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake unzip git aria2
-
+  lite:
+    name: Build lite (Android NDK)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake unzip aria2
       - name: Download Android NDK r23b
         run: |
-          aria2c -o android-ndk-r23b-linux.zip https://dl.google.com/android/repository/android-ndk-r23b-linux.zip
-          unzip -q android-ndk-r23b-linux.zip
-
-      - name: Restore busybox-static package
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          apt-get download busybox-static
-
-      - name: Configure and build wrapper-lite (Release)
+          aria2c -o ndk.zip https://dl.google.com/android/repository/android-ndk-r23b-linux.zip
+          unzip -q ndk.zip
+      - name: Build lite
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target wrapper_lite_exe wrapper_lite_rootless_exe -j$(nproc)
-          cmake --build build -j$(nproc)
-
-      - name: Build QEMU assets
-        run: |
-          chmod +x qemu/*.sh
-          ./qemu/mkdata.sh
-          ./qemu/build.sh
-
-      - name: Package native release
-        shell: bash
-        run: |
-          mkdir -p dist-native
-          cp wrapper-lite dist-native/
-          cp wrapper-lite-rootless dist-native/
-          cp -R rootfs dist-native/
-          cp README.md dist-native/
-          cp LICENSE dist-native/
-
-      - name: Upload wrapper-lite native package
-        uses: actions/upload-artifact@v7
+          cmake --build build -j"$(nproc)"
+      # A tarball keeps permissions (artifacts do not).
+      - run: tar czf rootfs.tar.gz rootfs
+      - uses: actions/upload-artifact@v7
         with:
-          name: wrapper-lite-linux-x86_64
-          path: dist-native
+          name: lite-rootfs
+          path: rootfs.tar.gz
 
-      - name: Package QEMU assets
-        shell: bash
-        run: |
-          mkdir -p dist-qemu-assets
-          cp qemu/vmlinuz-lite-qemu dist-qemu-assets/
-          cp qemu/lite-initramfs.cpio.gz dist-qemu-assets/
-          cp qemu/data.img dist-qemu-assets/
-          cp README.md dist-qemu-assets/
-          cp LICENSE dist-qemu-assets/
-
-      - name: Upload QEMU assets
-        uses: actions/upload-artifact@v7
-        with:
-          name: qemu-assets
-          path: dist-qemu-assets
-
-  build-wrapper-lite-qemu-android:
-    name: Package wrapper-lite-qemu (android-aarch64)
-    needs: build-wrapper-lite
+  guest:
+    name: Build QEMU guest + native smoke test
+    needs: lite
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-
-      - name: Download generic QEMU assets
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8
         with:
-          name: qemu-assets
-          path: qemu-assets
-
-      - name: Download Android NDK r23b
-        run: |
-          aria2c -o android-ndk-r23b-linux.zip https://dl.google.com/android/repository/android-ndk-r23b-linux.zip
-          unzip -q android-ndk-r23b-linux.zip
-
-      - name: Build Android launcher
-        run: |
-          ./android-ndk-r23b/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android22-clang++             -std=c++11 -O2 -s -nostdlib++ -lc++_static -lc++abi             -o wrapper-lite-qemu wrapper-lite-qemu.cpp
-
-      - name: Download and bundle Termux QEMU (binary + firmware + shared libraries)
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 android/bundle_termux_deps.py --target-dir dist/qemu/bin
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+          name: lite-rootfs
+      - run: tar xzf rootfs.tar.gz && rm rootfs.tar.gz
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          go-version: '1.22'
-
-      - name: Build Android GUI binary
-        shell: bash
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Build static wrapper
         run: |
-          cd gui
-          GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o ../wrapper-lite-gui .
-          cd ..
-
-      - name: Assemble Android package
-        shell: bash
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          cargo build --release --target x86_64-unknown-linux-musl -p wrapper
+      - name: Smoke test the rootless sandbox and the native agent
         run: |
-          mkdir -p dist/qemu
-          cp qemu-assets/vmlinuz-lite-qemu dist/qemu/
-          cp qemu-assets/lite-initramfs.cpio.gz dist/qemu/
-          cp qemu-assets/data.img dist/qemu/
-          cp wrapper-lite-qemu dist/
-          cp wrapper-lite-gui dist/
-          cp README.md dist/
-          cp LICENSE dist/
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Bundle QEMU into Android App Assets and Build APK
-        shell: bash
+          W=target/x86_64-unknown-linux-musl/release/wrapper
+          $W sandbox-exec --rootfs rootfs -- /system/bin/lite --help
+          $W agent --rootfs rootfs --port 12399 &
+          for i in $(seq 1 30); do curl -sf localhost:12399/status && break; sleep 1; done
+          curl -sf localhost:12399/status | grep -q '"code":0'
+          kill %1
+      - name: Build guest image
         run: |
-          mkdir -p android/app/src/main/assets/qemu
-          cp -R dist/qemu/* android/app/src/main/assets/qemu/
-          cp dist/wrapper-lite-qemu android/app/src/main/assets/qemu/ 2>/dev/null || true
-          cd android
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
-          mkdir -p ../dist-apk
-          cp app/build/outputs/apk/debug/app-debug.apk ../dist-apk/wrapper-lite-android.apk
-          cd ..
-
-      - name: Upload Android APK
-        uses: actions/upload-artifact@v7
+          apt-get download busybox-static
+          chmod +x qemu/*.sh
+          ./qemu/build.sh
+      - uses: actions/upload-artifact@v7
         with:
-          name: wrapper-lite-android-apk
-          path: dist-apk
+          name: qemu-guest
+          path: |
+            qemu/vmlinuz-lite-qemu
+            qemu/lite-initramfs.cpio.gz
 
-      - name: Upload Android package
-        uses: actions/upload-artifact@v7
-        with:
-          name: wrapper-lite-qemu-android-aarch64
-          path: dist
-
-  build-wrapper-lite-qemu:
-    name: Package wrapper-lite-qemu (${{ matrix.name }})
-    needs: build-wrapper-lite
+  package:
+    name: Package (${{ matrix.name }})
+    needs: [ web, lite, guest ]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - name: linux-x86_64
             os: ubuntu-22.04
-            artifact_suffix: linux-x86_64
           - name: linux-aarch64
             os: ubuntu-22.04-arm
-            artifact_suffix: linux-aarch64
           - name: windows-x86_64
             os: windows-2022
-            artifact_suffix: windows-x86_64
           - name: macos-aarch64
             os: macos-14
-            artifact_suffix: macos-aarch64
-
     runs-on: ${{ matrix.os }}
-
     steps:
       - uses: actions/checkout@v7
-
-      - name: Download QEMU assets
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8
         with:
-          name: qemu-assets
-          path: qemu-assets
+          name: web-dist
+          path: web/dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: qemu-guest
+          path: dist/qemu
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build wrapper
+        run: cargo build --release -p wrapper
 
       - name: Install QEMU (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 seabios ipxe-qemu
-
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 seabios ipxe-qemu
       - name: Install QEMU (macOS)
         if: runner.os == 'macOS'
         run: brew install qemu
-
       - name: Install QEMU (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: choco install qemu -y --no-progress
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      - name: Build launcher
-        shell: bash
-        run: |
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            g++ -std=c++11 -O2 -static -o wrapper-lite-qemu.exe wrapper-lite-qemu.cpp
-          else
-            c++ -std=c++11 -O2 -o wrapper-lite-qemu wrapper-lite-qemu.cpp
-          fi
-
-      - name: Build GUI launcher
-        shell: bash
-        run: |
-          cd gui
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            go build -ldflags="-s -w" -o ../wrapper-lite-gui.exe .
-          else
-            go build -ldflags="-s -w" -o ../wrapper-lite-gui .
-          fi
-          cd ..
-
-      - name: Assemble QEMU package
+      - name: Assemble package
         shell: bash
         run: |
           mkdir -p dist/qemu/bin
-          cp -R qemu-assets/* dist/qemu/
-          cp README.md dist/
-          cp LICENSE dist/
+          cp README.md LICENSE dist/
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp wrapper-lite-qemu.exe dist/
-            cp wrapper-lite-gui.exe dist/
+            cp target/release/wrapper.exe dist/
           else
-            cp wrapper-lite-qemu dist/
-            cp wrapper-lite-gui dist/
+            cp target/release/wrapper dist/
           fi
+
+      - name: Add the native rootfs (linux-x86_64)
+        if: matrix.name == 'linux-x86_64'
+        uses: actions/download-artifact@v8
+        with:
+          name: lite-rootfs
+      - name: Unpack the native rootfs (linux-x86_64)
+        if: matrix.name == 'linux-x86_64'
+        run: tar xzf rootfs.tar.gz -C dist && rm rootfs.tar.gz
 
       - name: Copy QEMU binary and firmware (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          set +e  # each bundle sub-step is best-effort; report but never fail
-          cp "$(command -v qemu-system-x86_64)" dist/qemu/bin/ 2>/dev/null || true
+          set +e  # best effort: report but never fail
+          cp "$(command -v qemu-system-x86_64)" dist/qemu/bin/
           if [[ "${{ runner.os }}" == "macOS" ]]; then
-            cp -R "$(brew --prefix)/share/qemu/"* dist/qemu/bin/ 2>/dev/null || true
+            cp -R "$(brew --prefix)/share/qemu/"* dist/qemu/bin/
           else
-            # bundle QEMU firmware + SeaBIOS + option ROMs so the launcher's
-            # `-L dist/qemu/bin` is self-contained
-            cp -R /usr/share/qemu/. dist/qemu/bin/ 2>/dev/null || true
-            cp -R /usr/share/seabios/. dist/qemu/bin/ 2>/dev/null || true
-            cp -R /usr/lib/ipxe/qemu/. dist/qemu/bin/ 2>/dev/null || true
-            # bundle the dynamically-linked shared libraries the QEMU binary
-            # needs (the launcher adds dist/qemu/bin to LD_LIBRARY_PATH)
-            ldd "$(command -v qemu-system-x86_64)" 2>/dev/null | \
-              awk '/=> \// {print $3}' | sort -u | \
-              while read -r so; do
-                [ -f "$so" ] && cp -n "$so" dist/qemu/bin/ 2>/dev/null || true
-              done
-            # bundle QEMU accel/device modules (QEMU_MODULE_DIR points here).
-            # Resolve the module dir by locating an accel .so in the installed
-            # tree; the dir name differs between x86_64/aarch64 runners and
-            # the modules may live in a different package than the binary.
+            cp -R /usr/share/qemu/. dist/qemu/bin/
+            cp -R /usr/share/seabios/. dist/qemu/bin/
+            cp -R /usr/lib/ipxe/qemu/. dist/qemu/bin/
+            # shared libraries (wrapper adds qemu/bin to LD_LIBRARY_PATH)
+            ldd "$(command -v qemu-system-x86_64)" | awk '/=> \// {print $3}' | sort -u | \
+              while read -r so; do cp -n "$so" dist/qemu/bin/; done
+            # accel/device modules (QEMU_MODULE_DIR points at qemu/bin)
             MODDIR="$(find /usr/lib /usr/lib64 -type f -name 'accel-*.so' 2>/dev/null | xargs -r dirname | sort -u | head -1)"
-            if [ -n "$MODDIR" ] && [ -d "$MODDIR" ]; then
-              cp -R "$MODDIR/." dist/qemu/bin/ 2>/dev/null || true
-            fi
+            [ -n "$MODDIR" ] && cp -R "$MODDIR/." dist/qemu/bin/
           fi
+          exit 0
 
-      - name: Copy QEMU binary (Windows)
+      - name: Copy QEMU binary and firmware (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $qemuDir = $null
           $q = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue
-          if ($q) { $qemuDir = Split-Path $q.Source }
-          if (-not $qemuDir) {
-            $candidates = @(
-              'C:/Program Files/qemu',
-              'C:/ProgramData/chocolatey/bin'
-            )
-            $qemuDir = $candidates | Where-Object { Test-Path (Join-Path $_ 'qemu-system-x86_64.exe') } | Select-Object -First 1
+          $qemuDir = if ($q) { Split-Path $q.Source } else {
+            @('C:/Program Files/qemu', 'C:/ProgramData/chocolatey/bin') |
+              Where-Object { Test-Path (Join-Path $_ 'qemu-system-x86_64.exe') } | Select-Object -First 1
           }
           if (-not $qemuDir) { Write-Error 'qemu-system-x86_64.exe not found'; exit 1 }
-          $dst = Join-Path (Join-Path 'dist' 'qemu') 'bin'
-          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          $dst = 'dist/qemu/bin'
           Copy-Item (Join-Path $qemuDir 'qemu-system-x86_64.exe') $dst
           Get-ChildItem (Join-Path $qemuDir '*.dll') -File | ForEach-Object { Copy-Item $_.FullName $dst }
-          # bundle firmware (bios-256k.bin, vgabios, option ROMs) for `-L bin`
           $share = Join-Path $qemuDir 'share'
-          if (Test-Path $share) {
-            Copy-Item -Recurse -Force (Join-Path $share '*') $dst
-          } else {
-            $bios = Get-ChildItem -Path $qemuDir -Recurse -Filter 'bios-256k.bin' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($bios) { Copy-Item -Recurse -Force (Join-Path $bios.DirectoryName '*') $dst }
-          }
-      - name: Upload QEMU package
-        uses: actions/upload-artifact@v7
+          if (Test-Path $share) { Copy-Item -Recurse -Force (Join-Path $share '*') $dst }
+
+      - uses: actions/upload-artifact@v7
         with:
-          name: wrapper-lite-qemu-${{ matrix.artifact_suffix }}
+          name: wrapper-${{ matrix.name }}
           path: dist
+
+  android:
+    name: Package (android-aarch64) + APK
+    needs: [ web, guest ]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web/dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: qemu-guest
+          path: dist/qemu
+      - name: Download Android NDK r23b
+        run: |
+          sudo apt-get update && sudo apt-get install -y aria2 unzip
+          aria2c -o ndk.zip https://dl.google.com/android/repository/android-ndk-r23b-linux.zip
+          unzip -q ndk.zip
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Build wrapper for Android
+        run: |
+          TC="$PWD/$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android24-clang"
+          export CC_aarch64_linux_android="$TC/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$TC/llvm-ar"
+          cargo build --release --target aarch64-linux-android -p wrapper
+      - name: Bundle Termux QEMU (binary, firmware, shared libraries)
+        run: python3 android/bundle_termux_deps.py --target-dir dist/qemu/bin
+      - name: Assemble package
+        run: |
+          cp target/aarch64-linux-android/release/wrapper dist/
+          cp README.md LICENSE dist/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wrapper-android-aarch64
+          path: dist
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build APK
+        run: |
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a android/app/src/main/assets
+          cp target/aarch64-linux-android/release/wrapper android/app/src/main/jniLibs/arm64-v8a/libwrapper.so
+          cp -R dist/qemu android/app/src/main/assets/qemu
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          mkdir -p ../dist-apk
+          cp app/build/outputs/apk/debug/app-debug.apk ../dist-apk/wrapper-android.apk
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wrapper-android-apk
+          path: dist-apk

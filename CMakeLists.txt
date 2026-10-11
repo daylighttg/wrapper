@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 
+# Builds the Android-side `lite` binary into rootfs/system/bin. Everything that
+# runs on the host is the Rust workspace (see Cargo.toml).
+
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 11)
 
@@ -8,12 +11,10 @@ set(TOOLCHAIN "${ANDROID_NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64")
 
 set(CMAKE_C_COMPILER "${TOOLCHAIN}/bin/x86_64-linux-android22-clang")
 set(CMAKE_CXX_COMPILER "${TOOLCHAIN}/bin/x86_64-linux-android22-clang++")
-set(C_COMPILER "${TOOLCHAIN}/bin/clang")
 
 project(wrapper-lite VERSION 1.0.0 LANGUAGES C CXX)
 
 include(FetchContent)
-include(ExternalProject)
 
 FetchContent_Declare(
     cjson
@@ -37,9 +38,6 @@ FetchContent_Declare(
 set(DOBBY_BUILD_TEST OFF CACHE BOOL "" FORCE)
 set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(dobby)
-
-set(WRAPPER_SOURCE wrapper-lite.c)
-set(WRAPPER_ROOTLESS_SOURCE wrapper-lite-rootless.c)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
@@ -103,30 +101,3 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_definitions(lite PRIVATE LITE_RELEASE)
 endif()
 target_link_options(lite PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
-
-# Host launchers are kept for native chroot/namespace use, but QEMU (run.sh)
-# is the default startup path.  Build them only when explicitly requested.
-option(BUILD_HOST_LAUNCHERS "Build wrapper-lite and wrapper-lite-rootless host launchers" ON)
-if(BUILD_HOST_LAUNCHERS)
-    ExternalProject_Add(
-        wrapper_lite_exe
-        PREFIX ${CMAKE_BINARY_DIR}/wrapper_build
-        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}
-        CONFIGURE_COMMAND ""
-        BUILD_COMMAND ${C_COMPILER} -O3 -Wall -s -o wrapper-lite ${WRAPPER_SOURCE}
-        BUILD_IN_SOURCE 1
-        INSTALL_COMMAND ""
-        DEPENDS lite
-    )
-
-    ExternalProject_Add(
-        wrapper_lite_rootless_exe
-        PREFIX ${CMAKE_BINARY_DIR}/wrapper_build
-        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}
-        CONFIGURE_COMMAND ""
-        BUILD_COMMAND ${C_COMPILER} -O3 -Wall -s -o wrapper-lite-rootless ${WRAPPER_ROOTLESS_SOURCE}
-        BUILD_IN_SOURCE 1
-        INSTALL_COMMAND ""
-        DEPENDS lite
-    )
-endif()

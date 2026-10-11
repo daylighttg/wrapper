@@ -1,16 +1,13 @@
 services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        NDK_VERSION: 23
+  wrapper:
+    build: .
     volumes:
       - ./rootfs/data:/app/rootfs/data
     ports:
       - "12340:12340"
     environment:
-      USERNAME: ${USERNAME}
-      PASSWORD: ${PASSWORD}
+      WRAPPER_API_TOKEN: ${WRAPPER_API_TOKEN:-}
+    # lite is started in a user namespace + chroot.
     security_opt:
       - seccomp:unconfined
+      - apparmor:unconfined
