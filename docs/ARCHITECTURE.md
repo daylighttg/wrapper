@@ -28,7 +28,8 @@ host (Windows / macOS / Linux / Android)        QEMU guest, or Linux natively
    `wrapper sandbox-exec`.
 2. **QEMU launcher in Rust** — `crates/host`, `wrapper qemu`; the guest init
    starts `wrapper agent`.
-3. New web GUI (Vite + Svelte) served by `wrapper gui`.
+3. **Web GUI** — `wrapper gui` (default command) serves the Vite + Svelte
+   panel from `web/`, runs the engine and proxies the agent API.
 4. CI, thin Android shell, removal of the C/C++/Go launchers.
 
 ## Crates
@@ -36,7 +37,8 @@ host (Windows / macOS / Linux / Android)        QEMU guest, or Linux natively
 | Crate | Purpose |
 |---|---|
 | `crates/agent` (`wrapper-agent`) | Library: account registry, lite supervision, login/2FA, routing, HTTP server, Linux sandbox. |
-| `crates/host` (`wrapper-host`) | Library: QEMU launcher (asset lookup, acceleration fallback, graceful shutdown). |
+| `crates/host` (`wrapper-host`) | Library: QEMU launcher (asset lookup, acceleration fallback, graceful shutdown) and the GUI server. |
+| `web/` | The panel (Svelte 5, Vite). `crates/host/build.rs` embeds `web/dist` into the binary. |
 | `crates/wrapper` | The `wrapper` binary: `agent`, `qemu`, `login`, `accounts`, internal `sandbox-exec`. |
 
 The guest contract (fw_cfg arguments, data disk, shutdown) is described in
@@ -145,6 +147,36 @@ Send `Authorization: Bearer <token>`; `?token=` also works (for SSE).
 | GET | `/api/logs` | `source`, `after`, `limit` | log entries |
 | POST | `/api/system/shutdown` | | stop all instances and exit (the guest then powers off) |
 | GET | `/api/events` | | SSE: `log`, `account`, `accountRemoved`, `login` |
+
+## The GUI (`wrapper gui`)
+
+```
+browser ──▶ wrapper gui (127.0.0.1:12341)
+             ├─ /api/host/*     settings, engine start/stop, console, package download
+             ├─ /api/agent/*    ─▶ agent /api/*  (adds the management token)
+             ├─ /api/public/*   ─▶ agent resource API (API tester)
+             └─ /*              embedded single-page app
+```
+
+* Engines: **QEMU** (any OS; `crates/host/src/qemu.rs`) or **native** (Linux
+  x86_64; spawns `wrapper agent --runtime sandbox`).
+* Settings live in `<data dir>/wrapper-gui.json` (default: next to the
+  binary). A random management token is generated on first run and passed to
+  the agent, so `/api` is never open on the public port.
+* Listening on a non-loopback address requires an access token (generated
+  and printed as `?token=…`, then kept in a cookie).
+* Children die with the GUI: `PR_SET_PDEATHSIG` on Linux, a kill-on-close job
+  object on Windows; closing the console window triggers a graceful stop.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/host/info` | platform, component status, package URL |
+| GET / PUT | `/api/host/config` | settings (PUT merges fields; an empty `apiToken` regenerates it) |
+| GET | `/api/host/status` | engine state |
+| POST | `/api/host/start` · `/stop` · `/restart` | control the engine |
+| GET | `/api/host/console` | QEMU / agent console lines |
+| GET | `/api/host/events` | SSE: `console`, `status`, `download` |
+| POST | `/api/host/package/download` | download and install the platform package |
 
 ### wrapper-manager compatibility
 

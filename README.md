@@ -69,6 +69,18 @@ curl -X POST localhost:12340/api/logins/<loginId>/code -H 'Content-Type: applica
 
 Use `--api-token <secret>` when listening on a non-local address.
 
+### Web panel
+
+`wrapper` without arguments (or `wrapper gui`) opens the panel at
+`http://127.0.0.1:12341`: start/stop the engine (QEMU on every OS, native on
+Linux x86_64), add accounts with 2FA, watch logs, change settings and download
+the QEMU package. Build the panel before the binary to embed it:
+
+```bash
+(cd web && npm ci && npm run build)
+cargo build --release
+```
+
 ### In QEMU (any OS)
 
 `wrapper qemu` replaces `wrapper-lite-qemu`: it boots the guest, whose init now

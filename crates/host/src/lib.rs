@@ -1,6 +1,8 @@
 //! Host side of wrapper: everything that runs on the user's machine rather
-//! than next to lite (QEMU launcher; the GUI server follows in phase 3).
+//! than next to lite: the QEMU launcher and the GUI server.
 
+pub mod gui;
+pub mod platform;
 pub mod qemu;
 
 use std::path::{Path, PathBuf};

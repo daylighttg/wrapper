@@ -2,6 +2,7 @@
 //!
 //! * `wrapper agent` — multi-account supervisor + aggregated API (Linux: in
 //!   the QEMU guest, or natively with a user-namespace sandbox).
+//! * `wrapper gui` (default) — web panel that runs the agent in QEMU or natively.
 //! * `wrapper qemu` — boot the agent in a QEMU guest (any host OS).
 //! * `wrapper login` / `wrapper accounts` — manage accounts of a running agent.
 //! * `wrapper sandbox-exec` — internal helper used by the agent to start lite
@@ -24,12 +25,15 @@ use wrapper_agent::{Agent, AgentConfig, BusLayer, EventBus, Layout, LiteOptions,
 #[derive(Parser)]
 #[command(name = "wrapper", version, about = "wrapper-lite multi-account manager")]
 struct Cli {
+    /// Defaults to `gui`.
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Web panel: manage the engine and accounts in the browser (default).
+    Gui(GuiArgs),
     /// Run the multi-account agent (Linux only).
     Agent(Box<AgentArgs>),
     /// Boot the agent inside a QEMU guest and forward its port.
@@ -106,6 +110,31 @@ struct AgentArgs {
     log_level: String,
 }
 
+#[derive(Args, Default)]
+struct GuiArgs {
+    /// Address the panel listens on.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: Option<String>,
+    #[arg(long, default_value_t = 12341)]
+    port: u16,
+    /// Where settings are stored [default: <exe dir>].
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// QEMU guest files [default: <exe dir>/qemu].
+    #[arg(long)]
+    assets_dir: Option<PathBuf>,
+    /// Wrapper rootfs for the native engine [default: <exe dir>/rootfs].
+    #[arg(long)]
+    rootfs: Option<PathBuf>,
+    /// Do not open a browser.
+    #[arg(long)]
+    no_browser: bool,
+    /// Token required to open the panel; generated automatically when
+    /// listening on a non-loopback address.
+    #[arg(long, env = "WRAPPER_GUI_TOKEN")]
+    access_token: Option<String>,
+}
+
 #[derive(Args)]
 struct QemuArgs {
     /// Directory with the kernel, initramfs and bin/ [default: <exe dir>/qemu].
@@ -156,7 +185,8 @@ struct SandboxArgs {
 
 fn main() {
     let cli = Cli::parse();
-    let code = match cli.cmd {
+    let code = match cli.cmd.unwrap_or_else(|| Cmd::Gui(GuiArgs { port: 12341, ..Default::default() })) {
+        Cmd::Gui(args) => run_async(run_gui(args)),
         Cmd::SandboxExec(args) => sandbox_exec(args),
         Cmd::Agent(args) => run_async(run_agent(*args)),
         Cmd::Qemu(args) => run_async(run_qemu(*args)),
@@ -301,8 +331,34 @@ async fn run_agent(args: AgentArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_gui(args: GuiArgs) -> anyhow::Result<()> {
+    use wrapper_host::gui::{self, engine::Paths, GuiOptions};
+    let _bus = init_logging("info");
+    wrapper_host::platform::kill_children_on_exit();
+    let exe = wrapper_host::exe_dir();
+    let host = args.host.unwrap_or_else(|| "127.0.0.1".into());
+    let listen: SocketAddr = format!("{host}:{}", args.port)
+        .parse()
+        .with_context(|| format!("invalid listen address {host}:{}", args.port))?;
+    let access_token = args.access_token.filter(|t| !t.is_empty()).or_else(|| {
+        (!listen.ip().is_loopback()).then(gui::config::random_token)
+    });
+    let opts = GuiOptions {
+        listen,
+        paths: Paths {
+            data_dir: args.data_dir.unwrap_or_else(gui::default_data_dir),
+            assets_dir: args.assets_dir.unwrap_or_else(|| exe.join("qemu")),
+            rootfs: args.rootfs.unwrap_or_else(|| exe.join("rootfs")),
+        },
+        open_browser: !args.no_browser,
+        access_token,
+    };
+    gui::run(opts, shutdown_signal()).await
+}
+
 async fn run_qemu(args: QemuArgs) -> anyhow::Result<()> {
     use wrapper_host::qemu::{run_vm, QemuConfig};
+    wrapper_host::platform::kill_children_on_exit();
     let assets = args.assets_dir.unwrap_or_else(|| wrapper_host::exe_dir().join("qemu"));
     let mut cfg = QemuConfig::new(assets);
     if let Some(d) = args.data_img {
@@ -343,6 +399,13 @@ async fn shutdown_signal() {
             _ = term.recv() => {}
         }
     }
-    #[cfg(not(unix))]
-    let _ = tokio::signal::ctrl_c().await;
+    #[cfg(windows)]
+    {
+        // Closing the console window gives us a few seconds to shut down.
+        let mut close = tokio::signal::windows::ctrl_close().expect("console close handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = close.recv() => {}
+        }
+    }
 }

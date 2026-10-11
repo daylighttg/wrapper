@@ -189,6 +189,12 @@ pub fn classify(msg: &str) -> Option<Signal> {
     if l.contains("2fa code timeout") {
         return failed("timed out waiting for the 2FA code".into(), true);
     }
+    if let Some(arg) = l.strip_prefix("unknown argument:") {
+        return failed(
+            format!("lite does not understand `{}`: the lite build (guest image or rootfs) is older than this wrapper", arg.trim()),
+            true,
+        );
+    }
     if l.contains("invalid login format") {
         return failed("invalid login format".into(), true);
     }
@@ -275,6 +281,10 @@ mod tests {
         assert_eq!(classify("dialog: No Active Subscription"), Some(Signal::SubscriptionDead));
         assert_eq!(classify("KDCanProcessCKC failed -42"), Some(Signal::Fairplay));
         assert_eq!(classify("request: GET /m3u8"), None);
+        assert!(matches!(
+            classify("unknown argument: --code-timeout"),
+            Some(Signal::LoginError { primary: true, ref reason }) if reason.contains("--code-timeout")
+        ));
     }
 
     #[test]

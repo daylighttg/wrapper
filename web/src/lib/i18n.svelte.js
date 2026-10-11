@@ -1,0 +1,338 @@
+// Minimal i18n: t(key, vars) reads the reactive locale, so templates update
+// when the language changes.
+
+const en = {
+  'nav.dashboard': 'Dashboard',
+  'nav.accounts': 'Accounts',
+  'nav.logs': 'Logs',
+  'nav.settings': 'Settings',
+  'nav.setup': 'Components',
+
+  'engine.qemu': 'QEMU virtual machine',
+  'engine.native': 'Native (Linux)',
+  'engine.state.stopped': 'Stopped',
+  'engine.state.starting': 'Starting',
+  'engine.state.running': 'Running',
+  'engine.state.stopping': 'Stopping',
+  'engine.state.failed': 'Failed',
+
+  'action.start': 'Start',
+  'action.stop': 'Stop',
+  'action.restart': 'Restart',
+  'action.save': 'Save',
+  'action.cancel': 'Cancel',
+  'action.copy': 'Copy',
+  'action.copied': 'Copied',
+  'action.delete': 'Delete',
+  'action.relogin': 'Log in again',
+  'action.addAccount': 'Add account',
+  'action.close': 'Close',
+  'action.show': 'Show',
+  'action.hide': 'Hide',
+  'action.send': 'Send',
+
+  'dash.engine': 'Engine',
+  'dash.since': 'up {time}',
+  'dash.endpoint': 'API endpoint',
+  'dash.endpointHint': 'Point AppleMusicDecrypt or other clients here. wrapper-lite and wrapper-manager compatible.',
+  'dash.lan': 'On your network',
+  'dash.token': 'Management token',
+  'dash.tokenHint': 'Needed only by tools that call /login, /logout or /api directly.',
+  'dash.accounts': 'Accounts',
+  'dash.runningOf': '{running} of {total} serving',
+  'dash.regions': 'Regions',
+  'dash.noRegions': 'none yet',
+  'dash.startingHint': 'The engine is booting. Under software emulation (TCG) this can take a few minutes.',
+  'dash.assetsMissing': 'QEMU or the guest files are missing.',
+  'dash.goSetup': 'Open Components',
+  'dash.memoryHint': '{n} accounts usually need about {mb} MB of VM memory; {cur} MB is configured.',
+  'dash.noAccounts': 'No accounts yet.',
+  'dash.viewAll': 'View all',
+  'dash.stopped': 'Start the engine to serve requests and manage accounts.',
+  'dash.tester': 'Try the API',
+  'dash.testerHint': 'Sends a request to the public endpoint from this browser.',
+
+  'acc.empty': 'No accounts',
+  'acc.emptyHint': 'Add an Apple Music account to start serving requests.',
+  'acc.engineOff': 'Start the engine to manage accounts.',
+  'acc.region': 'Region',
+  'acc.uptime': 'Up {time}',
+  'acc.restarts': '{n} restarts',
+  'acc.confirmDelete': 'Remove {user}? Its login data on this machine is deleted.',
+  'acc.degraded': 'Paused after FairPlay errors',
+  'acc.inFlight': '{n} active',
+  'acc.state.stopped': 'Stopped',
+  'acc.state.starting': 'Starting',
+  'acc.state.running': 'Serving',
+  'acc.state.backoff': 'Restarting',
+  'acc.state.loggingIn': 'Logging in',
+  'acc.state.needsLogin': 'Needs login',
+
+  'login.title': 'Add account',
+  'login.reloginTitle': 'Log in again',
+  'login.username': 'Apple ID',
+  'login.password': 'Password',
+  'login.advanced': 'Advanced',
+  'login.deviceInfo': 'Device info',
+  'login.deviceInfoHint': 'Leave empty to derive a stable device identity from the Apple ID.',
+  'login.submit': 'Log in',
+  'login.signingIn': 'Signing in…',
+  'login.needCode': 'Enter the 6-digit verification code Apple sent to your trusted devices.',
+  'login.code': 'Verification code',
+  'login.verify': 'Verify',
+  'login.success': 'Logged in',
+  'login.failed': 'Login failed',
+  'login.log': 'Login log',
+  'login.note': 'Your password is only passed to the local wrapper process and is not stored.',
+
+  'logs.agent': 'Agent',
+  'logs.console': 'Console',
+  'logs.allSources': 'All sources',
+  'logs.agentSource': 'Agent',
+  'logs.allLevels': 'All levels',
+  'logs.search': 'Filter…',
+  'logs.follow': 'Follow',
+  'logs.empty': 'Nothing logged yet.',
+
+  'set.engineSection': 'Engine',
+  'set.engine': 'Run the agent in',
+  'set.nativeUnsupported': 'Native mode requires Linux x86_64.',
+  'set.memory': 'VM memory (MB)',
+  'set.memoryHint': 'About 400 MB plus 150 MB per account.',
+  'set.smp': 'VM CPUs',
+  'set.accel': 'Acceleration',
+  'set.disk': 'Data disk size (MB)',
+  'set.diskHint': 'Only used when the disk is created.',
+  'set.network': 'Network',
+  'set.apiHost': 'Listen on',
+  'set.apiHostLocal': 'This computer only (127.0.0.1)',
+  'set.apiHostLan': 'All networks (0.0.0.0)',
+  'set.apiPort': 'API port',
+  'set.proxy': 'Proxy',
+  'set.proxyHint': 'e.g. http://127.0.0.1:7890 or socks5://…; used for Apple and downloads.',
+  'set.lite': 'wrapper-lite',
+  'set.deviceInfo': 'Default device info',
+  'set.logLevel': 'lite log level',
+  'set.refresh': 'Token refresh interval (s)',
+  'set.concurrency': 'Concurrent requests per account',
+  'set.security': 'Security',
+  'set.apiToken': 'Management token',
+  'set.regenerate': 'Regenerate',
+  'set.misc': 'Other',
+  'set.autostart': 'Start the engine when wrapper starts',
+  'set.mirror': 'Download through gh-proxy mirror',
+  'set.packageBase': 'Package source',
+  'set.saved': 'Settings saved',
+  'set.restartRequired': 'Restart the engine to apply the new settings.',
+
+  'setup.qemu': 'QEMU',
+  'setup.kernel': 'Guest kernel',
+  'setup.initrd': 'Guest image',
+  'setup.disk': 'Data disk',
+  'setup.diskHint': 'created on first start',
+  'setup.rootfs': 'Native rootfs',
+  'setup.found': 'Found',
+  'setup.missing': 'Missing',
+  'setup.package': 'Prebuilt package',
+  'setup.packageHint': 'Downloads QEMU and the guest files for {name} and installs them next to wrapper. Accounts and the data disk are kept.',
+  'setup.noPackage': 'There is no prebuilt package for this platform.',
+  'setup.download': 'Download / update',
+  'setup.downloading': 'Downloading',
+  'setup.extracting': 'Extracting',
+  'setup.done': 'Installed',
+  'setup.error': 'Download failed',
+  'setup.stopFirst': 'Stop the engine before updating.',
+  'setup.paths': 'Locations',
+
+  'common.hostOffline': 'Lost connection to wrapper. Reconnecting…',
+  'common.version': 'version {v}',
+};
+
+const zh = {
+  'nav.dashboard': '概览',
+  'nav.accounts': '账号',
+  'nav.logs': '日志',
+  'nav.settings': '设置',
+  'nav.setup': '组件',
+
+  'engine.qemu': 'QEMU 虚拟机',
+  'engine.native': '原生 (Linux)',
+  'engine.state.stopped': '已停止',
+  'engine.state.starting': '启动中',
+  'engine.state.running': '运行中',
+  'engine.state.stopping': '停止中',
+  'engine.state.failed': '失败',
+
+  'action.start': '启动',
+  'action.stop': '停止',
+  'action.restart': '重启',
+  'action.save': '保存',
+  'action.cancel': '取消',
+  'action.copy': '复制',
+  'action.copied': '已复制',
+  'action.delete': '删除',
+  'action.relogin': '重新登录',
+  'action.addAccount': '添加账号',
+  'action.close': '关闭',
+  'action.show': '显示',
+  'action.hide': '隐藏',
+  'action.send': '发送',
+
+  'dash.engine': '引擎',
+  'dash.since': '已运行 {time}',
+  'dash.endpoint': 'API 地址',
+  'dash.endpointHint': '在 AppleMusicDecrypt 等客户端中填写此地址，兼容 wrapper-lite 与 wrapper-manager。',
+  'dash.lan': '局域网地址',
+  'dash.token': '管理令牌',
+  'dash.tokenHint': '仅直接调用 /login、/logout 或 /api 的工具需要。',
+  'dash.accounts': '账号',
+  'dash.runningOf': '{total} 个中 {running} 个可用',
+  'dash.regions': '可用区域',
+  'dash.noRegions': '暂无',
+  'dash.startingHint': '引擎正在启动。纯软件模拟（TCG）下可能需要几分钟。',
+  'dash.assetsMissing': '缺少 QEMU 或客户机文件。',
+  'dash.goSetup': '前往组件',
+  'dash.memoryHint': '{n} 个账号通常需要约 {mb} MB 虚拟机内存，当前配置为 {cur} MB。',
+  'dash.noAccounts': '还没有账号。',
+  'dash.viewAll': '查看全部',
+  'dash.stopped': '启动引擎后才能处理请求和管理账号。',
+  'dash.tester': '测试 API',
+  'dash.testerHint': '从当前浏览器向公共 API 地址发送请求。',
+
+  'acc.empty': '暂无账号',
+  'acc.emptyHint': '添加一个 Apple Music 账号即可开始提供服务。',
+  'acc.engineOff': '启动引擎后才能管理账号。',
+  'acc.region': '区域',
+  'acc.uptime': '已运行 {time}',
+  'acc.restarts': '重启 {n} 次',
+  'acc.confirmDelete': '确定移除 {user}？本机上的登录数据会被删除。',
+  'acc.degraded': '因 FairPlay 错误暂停调度',
+  'acc.inFlight': '{n} 个请求处理中',
+  'acc.state.stopped': '已停止',
+  'acc.state.starting': '启动中',
+  'acc.state.running': '服务中',
+  'acc.state.backoff': '等待重启',
+  'acc.state.loggingIn': '登录中',
+  'acc.state.needsLogin': '需要重新登录',
+
+  'login.title': '添加账号',
+  'login.reloginTitle': '重新登录',
+  'login.username': 'Apple ID',
+  'login.password': '密码',
+  'login.advanced': '高级',
+  'login.deviceInfo': '设备信息',
+  'login.deviceInfoHint': '留空时根据 Apple ID 生成固定的设备标识。',
+  'login.submit': '登录',
+  'login.signingIn': '正在登录…',
+  'login.needCode': '请输入 Apple 发送到受信任设备上的 6 位验证码。',
+  'login.code': '验证码',
+  'login.verify': '验证',
+  'login.success': '登录成功',
+  'login.failed': '登录失败',
+  'login.log': '登录日志',
+  'login.note': '密码只会传给本机的 wrapper 进程，不会被保存。',
+
+  'logs.agent': 'Agent',
+  'logs.console': '控制台',
+  'logs.allSources': '全部来源',
+  'logs.agentSource': 'Agent',
+  'logs.allLevels': '全部级别',
+  'logs.search': '筛选…',
+  'logs.follow': '自动滚动',
+  'logs.empty': '暂无日志。',
+
+  'set.engineSection': '引擎',
+  'set.engine': '运行方式',
+  'set.nativeUnsupported': '原生模式需要 Linux x86_64。',
+  'set.memory': '虚拟机内存 (MB)',
+  'set.memoryHint': '约 400 MB，另加每个账号 150 MB。',
+  'set.smp': '虚拟机 CPU 数',
+  'set.accel': '加速方式',
+  'set.disk': '数据盘大小 (MB)',
+  'set.diskHint': '仅在首次创建数据盘时生效。',
+  'set.network': '网络',
+  'set.apiHost': '监听地址',
+  'set.apiHostLocal': '仅本机 (127.0.0.1)',
+  'set.apiHostLan': '所有网络 (0.0.0.0)',
+  'set.apiPort': 'API 端口',
+  'set.proxy': '代理',
+  'set.proxyHint': '如 http://127.0.0.1:7890 或 socks5://…，用于访问 Apple 和下载。',
+  'set.lite': 'wrapper-lite',
+  'set.deviceInfo': '默认设备信息',
+  'set.logLevel': 'lite 日志级别',
+  'set.refresh': '令牌刷新间隔 (秒)',
+  'set.concurrency': '每个账号的并发请求数',
+  'set.security': '安全',
+  'set.apiToken': '管理令牌',
+  'set.regenerate': '重新生成',
+  'set.misc': '其他',
+  'set.autostart': '启动 wrapper 时自动启动引擎',
+  'set.mirror': '通过 gh-proxy 镜像下载',
+  'set.packageBase': '组件包来源',
+  'set.saved': '设置已保存',
+  'set.restartRequired': '重启引擎后新设置才会生效。',
+
+  'setup.qemu': 'QEMU',
+  'setup.kernel': '客户机内核',
+  'setup.initrd': '客户机镜像',
+  'setup.disk': '数据盘',
+  'setup.diskHint': '首次启动时创建',
+  'setup.rootfs': '原生 rootfs',
+  'setup.found': '已就绪',
+  'setup.missing': '缺失',
+  'setup.package': '预编译组件包',
+  'setup.packageHint': '下载 {name} 对应的 QEMU 与客户机文件并安装到 wrapper 所在目录，账号和数据盘会保留。',
+  'setup.noPackage': '当前平台没有预编译组件包。',
+  'setup.download': '下载 / 更新',
+  'setup.downloading': '下载中',
+  'setup.extracting': '解压中',
+  'setup.done': '安装完成',
+  'setup.error': '下载失败',
+  'setup.stopFirst': '请先停止引擎再更新。',
+  'setup.paths': '路径',
+
+  'common.hostOffline': '与 wrapper 的连接已断开，正在重连…',
+  'common.version': '版本 {v}',
+};
+
+const dicts = { en, zh };
+
+function initial() {
+  try {
+    const saved = localStorage.getItem('wrapper.lang');
+    if (saved && dicts[saved]) return saved;
+  } catch {
+    /* storage unavailable */
+  }
+  return (navigator.language || 'en').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+}
+
+export const locale = $state({ lang: initial() });
+
+export function setLang(lang) {
+  locale.lang = lang;
+  try {
+    localStorage.setItem('wrapper.lang', lang);
+  } catch {
+    /* ignore */
+  }
+  document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+}
+
+export function t(key, vars) {
+  let s = dicts[locale.lang][key] ?? en[key] ?? key;
+  if (vars) for (const [k, v] of Object.entries(vars)) s = s.replaceAll(`{${k}}`, v);
+  return s;
+}
+
+/** "3h 12m" style duration from milliseconds. */
+export function duration(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m`;
+  return `${s}s`;
+}
