@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use tokio::process::Child;
 use tokio::sync::{mpsc, watch, Notify, Semaphore};
 use tokio::task::JoinHandle;
@@ -14,6 +15,7 @@ use crate::accounts::{AccountRecord, Layout};
 use crate::api::{AccountView, InstanceState};
 use crate::apple::AppleClient;
 use crate::events::{now_millis, Event, EventBus};
+use crate::health::HealthState;
 use crate::lite::{pump_output, LiteOptions, LiteRuntime, Signal};
 use crate::login::LoginSession;
 
@@ -34,6 +36,14 @@ pub struct AgentConfig {
     pub upstream_timeout: Duration,
     /// How many lite processes may be starting at the same time.
     pub startup_parallelism: usize,
+    /// How often an instance whose real traffic has shown no working `/key`
+    /// is probed (ZERO: only after FairPlay log signals and `/health?probe=1`).
+    pub probe_interval: Duration,
+    /// Minimum spacing of probes of one instance, and the wait before
+    /// confirming a failed one.
+    pub probe_confirm_gap: Duration,
+    /// Wait before probing again after a probe that could not decide.
+    pub probe_recheck: Duration,
 }
 
 impl AgentConfig {
@@ -49,6 +59,9 @@ impl AgentConfig {
             ready_timeout: Duration::from_secs(240),
             upstream_timeout: Duration::from_secs(30),
             startup_parallelism: 2,
+            probe_interval: Duration::from_secs(600),
+            probe_confirm_gap: Duration::from_secs(15),
+            probe_recheck: Duration::from_secs(60),
         }
     }
 }
@@ -85,6 +98,9 @@ pub struct Instance {
     pub(crate) sem: Semaphore,
     pub(crate) in_flight: AtomicUsize,
     circuit: Mutex<Circuit>,
+    pub(crate) health: Mutex<HealthState>,
+    /// Woken by FairPlay log signals; the health monitor then probes `/key`.
+    pub(crate) suspect: Notify,
     bus: Arc<EventBus>,
 }
 
@@ -107,6 +123,8 @@ impl Instance {
             sem: Semaphore::new(concurrency.max(1)),
             in_flight: AtomicUsize::new(0),
             circuit: Mutex::new(Circuit::default()),
+            health: Mutex::new(HealthState::default()),
+            suspect: Notify::new(),
             bus,
         })
     }
@@ -143,11 +161,12 @@ impl Instance {
             running_since: run.running_since,
             in_flight: self.in_flight.load(Ordering::Relaxed),
             degraded: self.circuit_open(),
+            health: self.health_view(),
             created_at: rec.created_at,
         }
     }
 
-    fn notify(&self) {
+    pub(crate) fn notify(&self) {
         self.bus.emit(Event::Account { account: self.view() });
     }
 
@@ -196,6 +215,29 @@ impl Instance {
             }
             None => false,
         }
+    }
+
+    /// Closes the circuit and forgets counted FairPlay failures.
+    pub(crate) fn circuit_reset(&self) {
+        let was_open = {
+            let mut c = self.circuit.lock().unwrap();
+            let open = c.open_until.is_some();
+            *c = Circuit::default();
+            open
+        };
+        if was_open {
+            self.notify();
+        }
+    }
+
+    /// Excludes the account for the cooldown without waiting for log hits.
+    pub(crate) fn circuit_trip(&self) {
+        {
+            let mut c = self.circuit.lock().unwrap();
+            c.fails = 0;
+            c.open_until = Some(Instant::now() + FAIRPLAY_COOLDOWN);
+        }
+        self.notify();
     }
 
     /// Counts a FairPlay failure; returns true when the circuit just opened.
@@ -437,7 +479,7 @@ impl Agent {
             .map(|r| r.to_lowercase()))
     }
 
-    async fn run_once(&self, inst: &Arc<Instance>, stop: &mut watch::Receiver<bool>) -> RunEnd {
+    async fn run_once(self: &Arc<Self>, inst: &Arc<Instance>, stop: &mut watch::Receiver<bool>) -> RunEnd {
         let permit = tokio::select! {
             p = self.startup.clone().acquire_owned() => p.expect("semaphore closed"),
             _ = stopped(stop) => return RunEnd::Stop,
@@ -508,7 +550,10 @@ impl Agent {
         }
         drop(permit);
 
-        // Phase 2: serve, with periodic health checks.
+        // Phase 2: serve, with periodic health checks and a monitor that probes
+        // the key path (see `health`).
+        let _ = inst.suspect.notified().now_or_never(); // drop a stale wake-up from a previous run
+        let mut monitor = AbortOnDrop(tokio::spawn(self.clone().health_monitor(inst.clone())));
         let mut health = tokio::time::interval_at(tokio::time::Instant::now() + HEALTH_INTERVAL, HEALTH_INTERVAL);
         let mut fails = 0;
         loop {
@@ -519,6 +564,10 @@ impl Agent {
                 }
                 st = child.wait() => {
                     return RunEnd::Restart(format!("lite exited ({})", describe_exit(st)));
+                }
+                why = &mut monitor.0 => {
+                    terminate(&mut child).await;
+                    return RunEnd::Restart(why.unwrap_or_else(|e| format!("health monitor failed: {e}")));
                 }
                 Some(sig) = sig_rx.recv() => {
                     if let Some(end) = self.on_signal(inst, sig) {
@@ -551,6 +600,10 @@ impl Agent {
 
     fn mark_running(&self, inst: &Instance, region: String) {
         tracing::info!(source = %inst.id, "ready, region {region}");
+        // A new process has a new FairPlay context: failures counted against
+        // the previous one say nothing about it (wrapper-manager likewise
+        // clears the circuit for a fresh lifecycle).
+        inst.circuit_reset();
         if inst.update_record(|r| r.region = region) {
             self.save_registry();
         }
@@ -566,6 +619,9 @@ impl Agent {
             Signal::SubscriptionDead => Some(RunEnd::NeedsLogin("no active Apple Music subscription".into())),
             Signal::SessionInvalid => Some(RunEnd::NeedsLogin("Apple ended the session; log in again".into())),
             Signal::Fairplay => {
+                // Let the health monitor find out whether this is a real
+                // breakage (restart) or a one-off.
+                inst.suspect.notify_one();
                 if inst.record_fairplay_failure() {
                     tracing::warn!(
                         source = %inst.id,
@@ -618,6 +674,16 @@ async fn supervise(agent: Arc<Agent>, inst: Arc<Instance>, mut stop: watch::Rece
                 backoff = (backoff * 2).min(BACKOFF_MAX);
             }
         }
+    }
+}
+
+/// Aborts the wrapped task when dropped, so every exit path of a run stops
+/// its health monitor.
+struct AbortOnDrop<T>(JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

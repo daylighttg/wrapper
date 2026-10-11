@@ -89,9 +89,39 @@ Running ──"No Active Subscription" / session ended──▶ NeedsLogin
 * One lite process per account, on a free `127.0.0.1` port.
 * At most `--startup-parallelism` (2) instances start at once; lite under TCG is
   CPU heavy while starting.
-* Health check: `/status` every 30 s; region changes are persisted.
-* FairPlay failures (`KDCanProcessCKC`) open a circuit breaker after 5 hits:
-  the account is skipped for 5 minutes but keeps running.
+* Liveness: `/status` every 30 s; region changes are persisted. This only
+  proves lite's HTTP server is up.
+* FairPlay failures (log lines containing `Fairplay error` or
+  `KDCanProcessCKC`, as in wrapper-manager) open a circuit breaker after 5
+  hits: the account is skipped for 5 minutes but keeps running. Any
+  successful `/key` (or probe), and every fresh lite process, closes it again
+  and resets the count.
+
+### Key-path health (`crates/agent/src/health.rs`)
+
+Those errors are not recoverable inside lite; restarting is. Log lines are
+only a *suspicion*, a `/key?adamId=0` request for the prefetch key is the
+*judge*, and a separate reachability check of Apple's key server (through
+lite's proxy) separates "the network is down" from "lite is broken":
+
+```
+FairPlay log line ─┐
+every 10 min,      ├─▶ probe /key (adamId=0)
+unless a real      │      ok ──────────────▶ healthy, circuit closed
+/key succeeded ────┘      failed
+                           ├─ Apple key server unreachable ─▶ network problem, no restart
+                           └─ reachable, failed twice (15 s apart) ─▶ restart lite
+                                 └─ already restarted 3× in the last hour ─▶ circuit breaker instead
+```
+
+* A health restart goes through the normal backoff (`Backoff`, 2 s doubling).
+* `--health-probe-interval <s>` (default 600, `0` = only on log suspicion and
+  `/health?probe=1`).
+* `GET /health` reports the result per account (`verdict`: `ok`, `busy`,
+  `liteDown`, `networkDown`, `broken`); the same `health` object is part of
+  every account in `/api/accounts`.
+* Probes take a normal request slot, so they never exceed
+  `--instance-concurrency`.
 
 ### Login
 
@@ -119,7 +149,10 @@ For `/m3u8`, `/key`, `/webplayback`, `/license`:
    code is 400, or 404 for `/lyrics`.
 
 `/lyrics` first prefers an account whose storefront actually has lyrics in the
-requested language (HEAD probe with that account's music token).
+requested language (HEAD probe with that account's music token). Storefronts
+that list the language (Apple's `/v1/storefronts`, `supportedLanguageTags`) are
+probed first, because another store may have the lyrics but not their
+translations; the rest only if none of those has them.
 
 ## HTTP API
 
@@ -209,5 +242,6 @@ it next to `qemu/`, skipping the running executable, `qemu/data.img` and
 
 `POST /login {username, password[, code]}` → `code 0` (done), `code 2`
 (`"2fa code require"`, `data.loginId`), `code -1` (failure, or
-`"already login"`). `POST /logout {username}` removes the account.
+`"already login"`). `POST /logout {username}` or `{id}` (the account UUID;
+`id` wins when both are given) removes the account.
 Disable both with `--no-legacy-management`.

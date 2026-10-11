@@ -120,6 +120,7 @@ All responses use:
 | `/webplayback` | GET | `adamId` |
 | `/license` | POST | JSON: `adamId`, `challenge`, `uri`, optional `drm-type` (`wv`=Widevine (default), `pr`=PlayReady) |
 | `/status` | GET | `regions` (storefronts that can be served), `clientCount` (serving accounts), `ready`, `status`, `degraded`, `accounts` |
+| `/health` | GET | Whether an account can really deliver a key (the agent requests the prefetch `/key` from each lite). Answers `503` when none can. Default: last known result per account, no Apple traffic. `?probe=1` probes live and needs the token when one is set. Suitable for a Docker/uptime check. |
 
 When no account can serve a request the agent answers
 `{"code":-1,"msg":"no available instance"}`. Failures that may be

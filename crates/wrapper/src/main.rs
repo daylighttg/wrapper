@@ -105,6 +105,11 @@ struct AgentArgs {
     /// lite instances allowed to start at the same time.
     #[arg(long, default_value_t = 2)]
     startup_parallelism: usize,
+    /// Seconds between active `/key` health probes of an account whose real
+    /// traffic has shown no working key (0: probe only after FairPlay errors
+    /// and on `/health?probe=1`).
+    #[arg(long, default_value_t = 600)]
+    health_probe_interval: u64,
     /// Agent log level (trace, debug, info, warn, error).
     #[arg(long, default_value = "info", env = "WRAPPER_LOG")]
     log_level: String,
@@ -309,6 +314,7 @@ async fn run_agent(args: AgentArgs) -> anyhow::Result<()> {
     cfg.instance_concurrency = args.instance_concurrency;
     cfg.ready_timeout = Duration::from_secs(args.ready_timeout);
     cfg.startup_parallelism = args.startup_parallelism;
+    cfg.probe_interval = Duration::from_secs(args.health_probe_interval);
 
     let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("cannot listen on {listen}"))?;
     let agent = Agent::new(cfg, bus)?;

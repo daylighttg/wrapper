@@ -212,6 +212,9 @@ pub fn classify(msg: &str) -> Option<Signal> {
     if SESSION.iter().any(|s| l.contains(s)) {
         return Some(Signal::SessionInvalid);
     }
+    // wrapper-manager's patterns, e.g. `handler exception: Fairplay error.
+    // KDCanProcessCKC status: -42786`. Every match counts towards the
+    // circuit breaker, so keep this narrow.
     if l.contains("fairplay error") || l.contains("kdcanprocessckc") {
         return Some(Signal::Fairplay);
     }
@@ -285,6 +288,51 @@ mod tests {
             classify("unknown argument: --code-timeout"),
             Some(Signal::LoginError { primary: true, ref reason }) if reason.contains("--code-timeout")
         ));
+    }
+
+    // Ported from wrapper-manager's wrapper_health_test.go and
+    // fairplay_circuit_test.go: which log lines mean what.
+    #[test]
+    fn subscription_and_session_signals() {
+        for l in [
+            "dialogHandler: {title: No Active Subscription, message: Renew...}",
+            "dialogHandler: {title: No Active Subscription, ...}",
+        ] {
+            assert_eq!(classify(l), Some(Signal::SubscriptionDead), "{l}");
+        }
+        assert_eq!(
+            classify("dialogHandler: {title: Check the account information you entered and try again., message: }"),
+            Some(Signal::SessionInvalid)
+        );
+        for l in [
+            "end lease", // ordinary lifecycle, MUST NOT trigger
+            "dialogHandler: {title: Sign In, message: }", // a plain sign-in prompt alone is not fatal
+            "credentialHandler: {title: , message: , 2FA: false}",
+            "request: GET /m3u8?adamId=1490256995",
+            "wrapper-lite listening on 127.0.0.1:51023",
+        ] {
+            assert_eq!(classify(l), None, "{l}");
+        }
+    }
+
+    #[test]
+    fn fairplay_signal_matches_only_the_key_refusal() {
+        for l in [
+            "handler exception: Fairplay error. KDCanProcessCKC status: -42786",
+            "Fairplay error",
+            "KDCanProcessCKC status: -42786",
+        ] {
+            assert_eq!(classify(l), Some(Signal::Fairplay), "{l}");
+        }
+        for l in [
+            "adamId: 1422652341, uri: skd://x",
+            "request: GET /key?adamId=0&uri=skd://itunes.apple.com/P000000000/s1/e1",
+            "refreshed context",
+            "No Active Subscription",
+            "end lease",
+        ] {
+            assert_ne!(classify(l), Some(Signal::Fairplay), "{l}");
+        }
     }
 
     #[test]

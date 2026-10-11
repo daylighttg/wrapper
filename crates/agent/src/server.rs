@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, RawQuery, Request, State};
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -28,15 +28,15 @@ use crate::agent::Agent;
 use crate::api::{
     CodeRequest, Envelope, InstanceState, LiteBody, LoginRequest, LoginState, LoginView, LogoutRequest, CODE_NEED_2FA,
 };
+use crate::health::PREFETCH_KEY_URI;
 use crate::login::LoginError;
 
 type AppState = Arc<Agent>;
 
-const PREFETCH_KEY_URI: &str = "skd://itunes.apple.com/P000000000/s1/e1";
-
 pub fn router(agent: Arc<Agent>) -> Router {
     let public = Router::new()
         .route("/status", get(status))
+        .route("/health", get(health))
         .route("/m3u8", get(m3u8))
         .route("/webplayback", get(webplayback))
         .route("/key", get(key))
@@ -99,22 +99,24 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Whether the request carries the management token (always true when none
+/// is configured).
+fn authorized(agent: &Agent, headers: &HeaderMap, query: Option<&str>) -> bool {
+    let Some(expected) = agent.cfg.api_token.as_deref() else {
+        return true;
+    };
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    // EventSource cannot set headers, so SSE passes ?token=.
+    let query = query.and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")));
+    [bearer, query].into_iter().flatten().any(|t| constant_time_eq(t.as_bytes(), expected.as_bytes()))
+}
+
 async fn require_token(State(agent): State<AppState>, req: Request, next: Next) -> Response {
-    if let Some(expected) = agent.cfg.api_token.as_deref() {
-        let bearer = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
-        // EventSource cannot set headers, so SSE passes ?token=.
-        let query = req
-            .uri()
-            .query()
-            .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")));
-        let ok = [bearer, query].into_iter().flatten().any(|t| constant_time_eq(t.as_bytes(), expected.as_bytes()));
-        if !ok {
-            return Envelope::fail("unauthorized").status(StatusCode::UNAUTHORIZED).into_response();
-        }
+    if !authorized(&agent, req.headers(), req.uri().query()) {
+        return Envelope::fail("unauthorized").status(StatusCode::UNAUTHORIZED).into_response();
     }
     next.run(req).await
 }
@@ -221,6 +223,33 @@ async fn status(State(a): State<AppState>) -> Envelope {
         "degraded": running.iter().filter(|i| i.circuit_open()).count(),
         "accounts": all.len(),
     }))
+}
+
+/// `GET /health`: whether any account can really serve a key.
+///
+/// By default this reports what the health monitor last learned (no Apple
+/// traffic, cheap enough for a Docker/uptime check). `?probe=1` first runs a
+/// live `/key` request against every running account and answers after they
+/// finish (up to ~45 s); it needs the management token when one is set,
+/// because each probe occupies a lite request slot. HTTP 503 when no account
+/// is healthy.
+async fn health(State(a): State<AppState>, headers: HeaderMap, RawQuery(raw): RawQuery) -> Response {
+    let wants_probe = raw
+        .as_deref()
+        .is_some_and(|q| q.split('&').any(|kv| matches!(kv, "probe=1" | "probe=true" | "deep=1" | "deep=true")));
+    if wants_probe {
+        if !authorized(&a, &headers, raw.as_deref()) {
+            return Envelope::fail("unauthorized").status(StatusCode::UNAUTHORIZED).into_response();
+        }
+        a.probe_all().await;
+    }
+    let report = a.health_report();
+    if report.healthy {
+        Envelope::ok(report).into_response()
+    } else {
+        let msg = format!("unhealthy: {}", report.status);
+        Envelope::with_code(crate::api::CODE_FAIL, msg, report).status(StatusCode::SERVICE_UNAVAILABLE).into_response()
+    }
 }
 
 // ---------------------------------------------------------- management API
@@ -405,10 +434,20 @@ async fn legacy_logout(State(a): State<AppState>, body: Result<Json<LogoutReques
     let Ok(Json(req)) = body else {
         return Envelope::fail("invalid JSON body");
     };
-    let username = req.username;
-    if a.remove_account(&account_id(&username)).await {
-        Envelope::ok(serde_json::json!({ "username": username }))
-    } else {
-        Envelope::fail("no such account")
+    let id = match req.resolve_id() {
+        Ok(id) => id,
+        Err(e) => return Envelope::fail(e),
+    };
+    if !a.remove_account(&id).await {
+        return Envelope::fail("no such account");
     }
+    // Echo what the caller sent, like wrapper-manager.
+    let mut data = serde_json::Map::new();
+    if !req.id.is_empty() {
+        data.insert("id".into(), req.id.into());
+    }
+    if !req.username.is_empty() {
+        data.insert("username".into(), req.username.into());
+    }
+    Envelope::ok(data)
 }

@@ -122,6 +122,8 @@ pub struct AccountView {
     pub in_flight: usize,
     /// Temporarily excluded after repeated FairPlay failures.
     pub degraded: bool,
+    /// Result of the active `/key` probe (see `/health`).
+    pub health: crate::health::HealthView,
     pub created_at: i64,
 }
 
@@ -162,7 +164,28 @@ pub struct CodeRequest {
     pub code: String,
 }
 
-#[derive(Debug, Deserialize)]
+/// wrapper-manager's `POST /logout` body: the Apple account name or the
+/// account (instance) UUID; `id` wins when both are given.
+#[derive(Debug, Default, Deserialize)]
 pub struct LogoutRequest {
+    #[serde(default)]
     pub username: String,
+    #[serde(default)]
+    pub id: String,
+}
+
+impl LogoutRequest {
+    /// The account id to log out.
+    pub fn resolve_id(&self) -> Result<String, &'static str> {
+        let id = self.id.trim();
+        if !id.is_empty() {
+            return uuid::Uuid::parse_str(id)
+                .map(|u| u.to_string())
+                .map_err(|_| "invalid id (expected a UUID)");
+        }
+        if self.username.trim().is_empty() {
+            return Err("missing username or id");
+        }
+        Ok(crate::accounts::account_id(&self.username))
+    }
 }

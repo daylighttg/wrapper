@@ -13,11 +13,11 @@ use reqwest::Method;
 
 use crate::agent::{Agent, Instance};
 use crate::api::{envelope_code, InstanceState, CODE_OK};
-use crate::apple::Kind;
+use crate::apple::{region_supports_lang, Kind};
 
 const MAX_ATTEMPTS: usize = 3;
 const RETRY_BUDGET: Duration = Duration::from_secs(45);
-const SLOT_WAIT: Duration = Duration::from_secs(15);
+pub(crate) const SLOT_WAIT: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 pub enum RouteError {
@@ -40,7 +40,7 @@ pub struct Forwarded {
 }
 
 /// Decrements the in-flight counter on drop.
-struct InFlight<'a>(&'a Instance);
+pub(crate) struct InFlight<'a>(pub(crate) &'a Instance);
 
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
@@ -105,6 +105,11 @@ impl Agent {
 
     /// Prefers an account whose storefront has lyrics for the song in
     /// `language`; `None` when probing finds nothing.
+    ///
+    /// Two tiers, like wrapper-manager: regions whose store lists the
+    /// language (a region without it may serve the lyrics but not their
+    /// translations) are probed first, the others only if none of those has
+    /// the lyrics.
     pub async fn lyrics_candidate(&self, adam_id: &str, language: &str, script: &str) -> Option<Arc<Instance>> {
         let serving = self.serving();
         if serving.len() <= 1 {
@@ -115,18 +120,29 @@ impl Agent {
         for i in serving {
             by_region.entry(i.region()).or_default().push(i);
         }
-        let probes = by_region.iter().map(|(region, insts)| async move {
-            let token = self.layout().read_token(&insts[0].id, "MUSIC_TOKEN");
-            let ok = !token.is_empty() && self.apple.has_lyrics(region, adam_id, language, script, &token).await;
-            (region.clone(), ok)
-        });
-        let hits: Vec<String> = futures_util::future::join_all(probes)
-            .await
-            .into_iter()
-            .filter_map(|(r, ok)| ok.then_some(r))
-            .collect();
-        let region = hits.choose(&mut rand::thread_rng())?;
-        by_region.get(region)?.iter().min_by_key(|i| i.in_flight.load(Ordering::Relaxed)).cloned()
+        let langs = self.apple.storefront_langs().await;
+        let (preferred, others): (Vec<&String>, Vec<&String>) = by_region
+            .keys()
+            .partition(|r| langs.as_deref().is_some_and(|l| region_supports_lang(l, r, language)));
+        for tier in [preferred, others] {
+            let probes = tier.into_iter().map(|region| {
+                let insts = &by_region[region];
+                async move {
+                    let token = self.layout().read_token(&insts[0].id, "MUSIC_TOKEN");
+                    let ok = !token.is_empty() && self.apple.has_lyrics(region, adam_id, language, script, &token).await;
+                    (region, ok)
+                }
+            });
+            let hits: Vec<&String> = futures_util::future::join_all(probes)
+                .await
+                .into_iter()
+                .filter_map(|(r, ok)| ok.then_some(r))
+                .collect();
+            if let Some(region) = hits.choose(&mut rand::thread_rng()) {
+                return by_region[*region].iter().min_by_key(|i| i.in_flight.load(Ordering::Relaxed)).cloned();
+            }
+        }
+        None
     }
 
     /// Sends one request to one lite instance.
@@ -158,6 +174,10 @@ impl Agent {
         let resp = req.send().await.map_err(|e| e.to_string())?;
         let body = resp.bytes().await.map_err(|e| e.to_string())?;
         let code = envelope_code(&body);
+        if code == CODE_OK && path == "/key" {
+            // Real traffic proves the key path works: no probe needed.
+            inst.note_key_ok();
+        }
         Ok(Forwarded { body, code })
     }
 
@@ -207,9 +227,21 @@ mod tests {
 
     #[test]
     fn retry_policy() {
-        assert!(!should_retry("/m3u8", 400));
-        assert!(!should_retry("/lyrics", 404));
-        assert!(should_retry("/m3u8", 404));
-        assert!(should_retry("/key", 500));
+        // wrapper-manager's retry_policy_test.go: caller errors and "no lyrics
+        // in that language" are the same on every account, the rest is not.
+        for (path, code, want) in [
+            ("/lyrics", 404, false),
+            ("/lyrics", 400, false),
+            ("/m3u8", 400, false),
+            ("/key", 400, false),
+            ("/lyrics", 500, true),
+            ("/key", 500, true),
+            ("/m3u8", 404, true),
+            ("/m3u8", 500, true),
+            ("/webplayback", 404, true),
+            ("/webplayback", 500, true),
+        ] {
+            assert_eq!(should_retry(path, code), want, "{path} {code}");
+        }
     }
 }

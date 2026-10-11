@@ -10,6 +10,7 @@ pub mod agent;
 pub mod api;
 pub mod apple;
 pub mod events;
+pub mod health;
 pub mod lite;
 pub mod login;
 pub mod router;
