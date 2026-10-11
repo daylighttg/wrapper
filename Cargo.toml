@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = ["crates/agent", "crates/host", "crates/wrapper"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http-body-util = "0.1"
+libc = "0.2"
+rand = "0.8"
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "socks", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "net", "time", "sync", "signal", "fs"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+uuid = { version = "1", features = ["v5", "v4"] }
+wrapper-agent = { path = "crates/agent" }
+wrapper-host = { path = "crates/host" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

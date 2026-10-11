@@ -33,13 +33,13 @@
         </activity>
 
         <service
-            android:name=".QemuService"
+            android:name=".WrapperService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Local virtualization service for wrapper-lite Apple Music guest" />
+                android:value="Runs the local wrapper service and its QEMU guest" />
         </service>
 
     </application>

@@ -1,80 +1,55 @@
-# wrapper-lite QEMU
+# wrapper QEMU guest
 
-Run wrapper-lite inside `qemu-system-x86_64`.
+The guest is a Linux kernel plus an initramfs containing the wrapper rootfs
+(Android libraries + `lite`), busybox and the static `wrapper` binary. Its
+`init` brings up networking and the data disk and runs:
+
+```
+/bin/wrapper agent --runtime direct --state-dir /data --host 0.0.0.0 --port 12340 <extra args>
+```
+
+The host side is `wrapper qemu` (or the GUI), which forwards one host port to
+guest port 12340.
 
 ## Layout
 
 ```text
-wrapper-lite-qemu.cpp       # launcher source (repository root)
-wrapper-lite-qemu           # launcher binary
-qemu/
-├── vmlinuz-lite-qemu
-├── lite-initramfs.cpio.gz
-├── data.img
-├── build.sh
-├── mkdata.sh
-├── init
-└── README.md
+<exe dir>/
+├── wrapper(.exe)                host binary
+└── qemu/
+    ├── vmlinuz-lite-qemu
+    ├── lite-initramfs.cpio.gz
+    ├── data.img                 created on first run, formatted by the guest
+    └── bin/                     bundled QEMU + firmware (optional)
 ```
 
-## Build QEMU assets
+## Build the guest
 
 ```bash
 apt-get download busybox-static
+cargo build --release --target x86_64-unknown-linux-musl   # or set WRAPPER_BIN
 ./qemu/build.sh
 ```
 
-## Build launcher
+## Host ↔ guest contract
 
-```bash
-c++ -std=c++11 -O2 -o wrapper-lite-qemu wrapper-lite-qemu.cpp
-```
-
-## Run
-
-```bash
-./wrapper-lite-qemu --help
-./wrapper-lite-qemu --login user:pass --base-dir /data
-./wrapper-lite-qemu
-```
-
-All arguments except `--accel` are forwarded line-by-line to wrapper-lite inside the guest.
+| What | How |
+|---|---|
+| Agent arguments | fw_cfg `opt/wrapper/args` (one per line); fallback `wrapper_args_b64=` on the kernel command line |
+| API | `hostfwd=tcp:<host>:<host-port>-:12340` |
+| Persistent state | virtio disk `/dev/vda` → `/data` (ext2/4; formatted when it has no ext superblock) |
+| DNS | QEMU user networking, `nameserver 10.0.2.3` |
+| Shutdown | `POST /api/system/shutdown`; init syncs, unmounts and powers off when the agent exits |
 
 ## Acceleration
 
-- Linux: auto-detect KVM.
-- macOS: try HVF, fall back to TCG.
-- Windows: try WHPX, fall back to TCG.
-
-Force acceleration:
-
-```bash
-./wrapper-lite-qemu --accel kvm ...
-./wrapper-lite-qemu --accel hvf ...
-./wrapper-lite-qemu --accel whpx ...
-./wrapper-lite-qemu --accel tcg ...
-```
-
-Windows WHPX uses:
-
-```text
--accel whpx,kernel-irqchip=off
--cpu qemu64-v1
-```
-
-## Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HOST_PORT` | `12340` | host port |
-| `GUEST_PORT` | `12340` | guest port |
-| `MEMORY` | `512` | guest memory in MB |
-| `SMP` | `2` | guest CPU count |
-| `LITE_QEMU_ACCEL` | auto | force acceleration |
-| `QEMU_BIN` | auto | QEMU binary path |
+`--accel auto` picks KVM (Linux with `/dev/kvm`), WHPX (Windows), HVF (Intel
+macOS) or TCG, and falls back to TCG when the chosen accelerator fails within
+the first 20 seconds. Force one with `--accel kvm|whpx|hvf|tcg`.
 
 ## QEMU lookup order
 
-1. `QEMU_BIN`
-2. `PATH`
-3. `qemu/bin/`
+1. `--qemu-bin` / `QEMU_BIN`
+2. `qemu/bin/` (bundled)
+3. `PATH`
+4. well-known install directories

@@ -1,101 +1,108 @@
 # wrapper-lite
 
-A lightweight single-port HTTP wrapper for Apple Music decryption.
+A multi-account HTTP wrapper for Apple Music decryption.
 
-It provides five endpoints on one HTTP port: M3U8, Key, Lyrics, License, and WebPlayback.
+One installation runs any number of Apple Music accounts and serves them
+behind a single wrapper-lite compatible endpoint (`/m3u8`, `/key`, `/lyrics`,
+`/webplayback`, `/license`, `/status`). Requests are routed to an account
+whose storefront can serve the item. The API is also compatible with
+[wrapper-manager](https://github.com/WorldObservationLog/wrapper-manager)
+(`POST /login`, `POST /logout`), so
+[AppleMusicDecrypt](https://github.com/WorldObservationLog/AppleMusicDecrypt)
+and other clients work unchanged.
 
-> **Recommended way to run**: use the `wrapper-lite-gui` cross-platform GUI or `wrapper-lite-qemu` launcher — it boots a
-> self-contained QEMU guest and forwards the HTTP API to the host, so you don't
-> need a rooted device or a native chroot. See
-> [Cross-Platform GUI](#cross-platform-gui) and [Run with QEMU](#run-with-qemu-recommended).
+Everything on the host is one Rust binary, `wrapper`, with a web panel. The
+Apple-side `lite` process runs inside a small QEMU guest (any OS) or natively
+on Linux x86_64. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the
+design.
 
-## Cross-Platform GUI (Windows, macOS, Linux, Android)
-
-A modern, responsive cross-platform GUI is available for **Windows**, **macOS**, **Linux**, and **Android**.
-
-- **Non-Linux systems (Windows, macOS)**: directly leverage precompiled QEMU packages or download them with one click from [nightly.link](https://nightly.link/itouakirai/wrapper/workflows/build-lite/lite?preview).
-- **Android**: native Android app with embedded `qemu-system-x86-64-headless` (Termux build) running QEMU in a Foreground Service with WakeLock.
-- **Linux**: supports both native rootless execution and QEMU virtualized guest mode.
-
-### Quick Start
-
-- **Windows**: run `wrapper-lite-gui.exe` (auto-opens browser to `http://127.0.0.1:12341`).
-- **macOS**: run `./wrapper-lite-gui` (macOS arm64/x86_64).
-- **Linux**: run `./wrapper-lite-gui` (Linux x86_64/aarch64).
-- **Android**: install `wrapper-lite-android.apk` (or run `./wrapper-lite-gui-android-aarch64` in Termux).
-
-See [gui/README.md](gui/README.md) for detailed configuration and build instructions.
-
-## Build
-
-```bash
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
+```
+client ──HTTP──▶ wrapper agent ──▶ lite (account A, jp)
+                     │          └─▶ lite (account B, us) …
+                     └─ inside QEMU (Windows / macOS / Android / Linux) or native Linux
 ```
 
-Debug build:
+## Quick start
+
+Download the package for your platform from the
+[nightly builds](https://nightly.link/itouakirai/wrapper/workflows/build-lite/lite?preview):
+
+| Platform | Package |
+|---|---|
+| Windows x86_64 | `wrapper-windows-x86_64.zip` |
+| macOS Apple Silicon | `wrapper-macos-aarch64.zip` |
+| Linux x86_64 (QEMU or native) | `wrapper-linux-x86_64.zip` |
+| Linux aarch64 | `wrapper-linux-aarch64.zip` |
+| Android | `wrapper-android-apk` (APK), or `wrapper-android-aarch64.zip` for Termux |
+
+1. Unzip and run `wrapper` (`wrapper.exe` on Windows). The panel opens at
+   `http://127.0.0.1:12341`.
+2. Click **Start**. The first QEMU boot creates and formats a data disk.
+3. Open **Accounts → Add account**, enter your Apple ID and password, and the
+   2FA code when asked. Add as many accounts as you like.
+4. Point your client at the API endpoint shown on the dashboard
+   (default `http://127.0.0.1:12340`).
+
+To serve other machines, set **Settings → Network → Listen on** to
+`0.0.0.0`. The management endpoints (`/login`, `/logout`, `/api`) always
+require the management token shown in the panel.
+
+Upgrading from the single-account version: an existing `qemu/data.img` (or
+`rootfs/data`) keeps working; its account is migrated automatically and shows
+up as `legacy-account` (log in again to refresh its name).
+
+### Android
+
+Install the APK. It runs `wrapper` with the bundled QEMU in a foreground
+service (with wake and Wi-Fi locks) and shows the same panel. The API is
+reachable at `http://127.0.0.1:12340`, or from your network when the listen
+address is `0.0.0.0`. Stop it from the notification.
+
+In Termux: `./wrapper gui --no-browser`, then open the printed URL.
+
+### Linux without QEMU
+
+On Linux x86_64 the agent can run lite directly in a user-namespace chroot
+(no root needed; the kernel must allow unprivileged user namespaces). Choose
+**Native** in the panel, or run headless:
 
 ```bash
-cmake .. -DCMAKE_BUILD_TYPE=Debug
+./wrapper agent --host 0.0.0.0 --port 12340 --api-token <secret>   # uses ./rootfs
+./wrapper login --token <secret>                                  # Apple ID, password, 2FA
 ```
 
-Build outputs:
-
-- `rootfs/system/bin/lite` — Android-layer binary
-- `wrapper-lite` — privileged host launcher
-- `wrapper-lite-rootless` — rootless host launcher (user namespaces)
-
-## Run natively
+### Headless QEMU
 
 ```bash
-# Login, cache tokens, then exit
-./wrapper-lite-rootless --login user:pass --code-from-file --base-dir /data
-
-# Start the HTTP service
-./wrapper-lite-rootless --base-dir /data --host 0.0.0.0 --port 12340
+./wrapper qemu --host 0.0.0.0 --host-port 12340 --api-token <secret>
+./wrapper login --token <secret>
+./wrapper accounts --token <secret>
 ```
 
-2FA code:
+Ctrl+C stops the lite processes and powers the guest off cleanly.
 
-- Interactive prompt when a TTY is available.
-- With `--code-from-file`, the code is read from `data/2fa.txt`.
-
-## Run with QEMU (recommended)
-
-`wrapper-lite-qemu` is the recommended launcher. It boots the prebuilt guest
-(the `qemu/` assets) in QEMU and forwards the guest's HTTP service to the host,
-so no rooted device or native chroot is required. Prebuilt releases already
-bundle QEMU plus its firmware in `qemu/bin/` for Linux, macOS, Windows and
-Android.
+### Docker
 
 ```bash
-# one-time: build the launcher (or download a prebuilt release)
-c++ -std=c++11 -O2 -o wrapper-lite-qemu wrapper-lite-qemu.cpp
-
-# login first (forwards --login to the guest lite), then serve
-./wrapper-lite-qemu --login user:pass --code-from-file
-./wrapper-lite-qemu
+WRAPPER_API_TOKEN=<secret> docker compose up -d --build
+docker compose exec wrapper /app/wrapper login --token <secret>
 ```
 
-The launcher locates the QEMU binary in this order:
+The container runs the native agent; account data lives in `./rootfs/data`.
+User namespaces need `seccomp`/`apparmor` relaxed (as in `compose.yaml`) or
+`--privileged`.
 
-1. `--qemu-bin <path>` / `QEMU_BIN`
-2. `PATH`
-3. `qemu/bin/` (bundled)
+## Commands
 
-See [QEMU launcher arguments](#qemu-launcher-arguments) for the full option
-list.
+| Command | Purpose |
+|---|---|
+| `wrapper` / `wrapper gui` | Web panel (`--host`, `--port 12341`, `--no-browser`, `--data-dir`, `--assets-dir`, `--rootfs`, `--access-token`) |
+| `wrapper qemu` | Boot the agent in QEMU (`--host`, `--host-port`, `--memory`, `--smp`, `--accel kvm\|whpx\|hvf\|tcg`, `--qemu-bin`, `--disk-size`, `--api-token`, `--proxy`, `-- <agent args>`) |
+| `wrapper agent` | Run the agent (Linux; `--runtime auto\|direct\|sandbox\|sandbox-privileged`, `--proxy`, `--api-token`, `--device-info`, `--instance-concurrency`, …) |
+| `wrapper login` | Add or re-login an account on a running agent, with interactive 2FA |
+| `wrapper accounts` | List accounts and their state |
 
-## Docker
-
-```bash
-docker build -t wrapper-lite:local .
-docker run --privileged -p 12340:12340 \
-  -v ./rootfs/data:/app/rootfs/data \
-  -e USERNAME=... -e PASSWORD=... \
-  wrapper-lite:local
-```
+`wrapper <command> --help` lists every option.
 
 ## HTTP API
 
@@ -112,14 +119,50 @@ All responses use:
 | `/lyrics` | GET | `adamId`, optional `language`, optional `syllable` (`1`=word-timed syllable-lyrics with translations/romanization, `0`=line-timed lyrics converted in-wrapper **and still carrying translations/romanization as whole-line text**), optional `script` (transliteration script, default `en-Latn`) |
 | `/webplayback` | GET | `adamId` |
 | `/license` | POST | JSON: `adamId`, `challenge`, `uri`, optional `drm-type` (`wv`=Widevine (default), `pr`=PlayReady) |
-| `/status` | GET | returns `regions` (list of storefront codes this wrapper can serve) |
+| `/status` | GET | `regions` (storefronts that can be served), `clientCount` (serving accounts), `ready`, `status`, `degraded`, `accounts` |
+
+When no account can serve a request the agent answers
+`{"code":-1,"msg":"no available instance"}`. Failures that may be
+account-specific are retried on another account.
+
+Account management (token required):
+
+| Endpoint | Method | Body |
+|---|---|---|
+| `/login` | POST | `{"username","password"}` → `code 2` + `data.loginId` when a 2FA code is needed; repeat with `"code"` |
+| `/logout` | POST | `{"username"}` |
+| `/api/...` | | full management API, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#http-api) |
+
+## Build from source
+
+```bash
+# 1. lite (Android NDK r23b unpacked in the repo root) -> rootfs/system/bin/lite
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+
+# 2. web panel -> web/dist (embedded into the host binary)
+(cd web && npm ci && npm run build)
+
+# 3. host binary -> target/release/wrapper
+cargo build --release
+
+# 4. QEMU guest -> qemu/vmlinuz-lite-qemu, qemu/lite-initramfs.cpio.gz
+cargo build --release --target x86_64-unknown-linux-musl
+apt-get download busybox-static && ./qemu/build.sh
+```
+
+The CI workflow (`.github/workflows/build-lite.yml`) also builds the Android
+binary (`aarch64-linux-android`, NDK clang as linker) and the APK, which
+bundles it as `libwrapper.so`.
 
 ## lite arguments
+
+`lite` is normally started by the agent; these are its own options.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--login user:pass` | — | login, cache tokens, then exit |
 | `--code-from-file` | off | read 2FA code from file |
+| `--code-timeout` | `60` | seconds to wait for `2fa.txt` |
 | `--host` | `127.0.0.1` | listen address |
 | `--port` | `12340` | listen port |
 | `--base-dir` | `data` | data directory |
@@ -149,33 +192,8 @@ The trailing `AndroidID` is derived automatically:
 - In service mode (no username), the persisted `ANDROID_ID` is reused; if none
   exists, a built-in default is used.
 
-Pass `--device-info <string>` to override the entire string explicitly.
-
-## QEMU launcher arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--host <addr>` | `127.0.0.1` | host address the forwarded port binds to (`0.0.0.0` to expose) |
-| `--host-port <port>` | `12340` | host port |
-| `--guest-port <port>` | `12340` | guest port |
-| `--guest-host <addr>` | `0.0.0.0` | address the guest lite listens on (must be reachable by QEMU forwarding) |
-| `--memory <MB>` | `512` | guest memory in MB |
-| `--smp <N>` | `2` | guest CPU count |
-| `--accel <accel>` | auto | force acceleration (`kvm`, `hvf`, `whpx`, `tcg`) |
-| `--qemu-bin <path>` | auto | QEMU binary path |
-
-Environment variables (fallbacks; command-line flags take precedence):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LITE_QEMU_HOST` | `127.0.0.1` | host address the forwarded port binds to |
-| `HOST_PORT` | `12340` | host port |
-| `GUEST_PORT` | `12340` | guest port |
-| `LITE_GUEST_HOST` | `0.0.0.0` | address the guest lite listens on |
-| `MEMORY` | `512` | guest memory in MB |
-| `SMP` | `2` | guest CPU count |
-| `LITE_QEMU_ACCEL` | auto | force acceleration |
-| `QEMU_BIN` | auto | QEMU binary path |
+Pass `--device-info <string>` (per account in the login dialog, or as the
+default in the settings) to override the entire string explicitly.
 
 ## Build notes
 

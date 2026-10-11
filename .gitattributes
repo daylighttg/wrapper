@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Executed inside Linux / the QEMU guest: never check out with CRLF.
+*.sh text eol=lf
+qemu/init text eol=lf
+android/gradlew text eol=lf
+*.bat text eol=crlf

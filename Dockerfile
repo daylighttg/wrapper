@@ -1,33 +1,31 @@
-ARG BUILD_PLATFORM=linux/amd64
-ARG RUNTIME_PLATFORM=linux/amd64
-
-FROM --platform=${BUILD_PLATFORM} debian:13.2 AS build
+# Native multi-account agent: lite runs chrooted in a user namespace inside
+# the container, so the container needs seccomp/apparmor relaxed (see
+# compose.yaml) or --privileged.
 ARG NDK_VERSION=23
 
-SHELL ["/bin/bash", "-c"]
+FROM debian:13.2 AS lite
+ARG NDK_VERSION
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake unzip git ca-certificates aria2 \
+    && rm -rf /var/lib/apt/lists/*
+RUN aria2c -o ndk.zip https://dl.google.com/android/repository/android-ndk-r${NDK_VERSION}b-linux.zip \
+    && unzip -q ndk.zip && mv android-ndk-r${NDK_VERSION}b android-ndk-r23b && rm ndk.zip
+COPY CMakeLists.txt import.h ./
+COPY lite ./lite
+COPY rootfs ./rootfs
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j"$(nproc)"
 
-RUN apt-get update && apt-get install -y \
-        build-essential cmake unzip git lsb-release gnupg aria2
+FROM rust:1.85-bookworm AS wrapper
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --release -p wrapper
 
-RUN bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)"
-
-RUN aria2c -o android-ndk-r${NDK_VERSION}b-linux.zip https://dl.google.com/android/repository/android-ndk-r${NDK_VERSION}b-linux.zip \
-    && unzip -q -d /app android-ndk-r${NDK_VERSION}b-linux.zip \
-    && rm android-ndk-r${NDK_VERSION}b-linux.zip
-
-COPY ./ ./
-
-RUN mkdir -p build     && cmake -S /app -B /app/build -DCMAKE_BUILD_TYPE=Release -DBUILD_HOST_LAUNCHERS=ON     && cmake --build /app/build --target wrapper_lite_exe wrapper_lite_rootless_exe -j$(nproc)     && cmake --build /app/build -j$(nproc)
-
-FROM --platform=${RUNTIME_PLATFORM} debian:13.2
-
+FROM debian:13.2
 WORKDIR /app
-COPY --from=build /app/wrapper-lite-rootless /app/wrapper-lite-rootless
-COPY --from=build /app/rootfs /app/rootfs
-COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh /app/wrapper-lite-rootless
-
-CMD ["/app/entrypoint.sh"]
-
+COPY --from=lite /app/rootfs /app/rootfs
+COPY --from=wrapper /src/target/release/wrapper /app/wrapper
 EXPOSE 12340
+# Set WRAPPER_API_TOKEN to protect /login, /logout and /api.
+CMD ["/app/wrapper", "agent", "--host", "0.0.0.0", "--port", "12340"]

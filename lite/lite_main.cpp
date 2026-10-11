@@ -463,7 +463,8 @@ static void signal_worker() {
 /* ============================== */
 
 static void print_usage() {
-    LOG_INFO("usage: lite [--login user:pass] [--host 127.0.0.1] [--port 12340]");
+    LOG_INFO("usage: lite [--login user:pass] [--code-from-file] [--code-timeout SECONDS]");
+    LOG_INFO("            [--host 127.0.0.1] [--port 12340]");
     LOG_INFO("            [--device-info STR] [--base-dir data] [--proxy URL] [--debug]");
     LOG_INFO("            [--log-level debug|info|warn|error] [--log-file PATH]");
     LOG_INFO("            [--token-refresh-interval SECONDS]");
@@ -506,6 +507,10 @@ int main(int argc, char* argv[]) {
         else if (arg == "--port" && i + 1 < cmdline_args.size()) g_port = atoi(cmdline_args[++i].c_str());
         else if (arg == "--debug") { g_log_level = "debug"; g_ssl_verify_disabled = true; }
         else if (arg == "--code-from-file") g_code_from_file = true;
+        else if (arg == "--code-timeout" && i + 1 < cmdline_args.size()) {
+            g_code_timeout = atoi(cmdline_args[++i].c_str());
+            if (g_code_timeout <= 0) g_code_timeout = 60;
+        }
         else if (arg == "--log-level" && i + 1 < cmdline_args.size()) g_log_level = cmdline_args[++i];
         else if (arg == "--log-file" && i + 1 < cmdline_args.size()) g_log_file = cmdline_args[++i];
         else if (arg == "--token-refresh-interval" && i + 1 < cmdline_args.size()) g_token_refresh_interval = atoi(cmdline_args[++i].c_str());

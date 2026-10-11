@@ -99,6 +99,7 @@ struct shared_ptr;
 extern struct shared_ptr g_reqCtx;
 extern bool g_ssl_verify_disabled;
 extern bool g_code_from_file;
+extern int g_code_timeout; /* seconds to wait for 2fa.txt */
 
 void install_hooks();
 struct shared_ptr init_ctx();
