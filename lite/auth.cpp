@@ -76,13 +76,13 @@ void credentialHandler(struct shared_ptr* credReqPtr,
         if (!got_code) {
             if (!file_exists(path.c_str())) {
                 LOG_WARN("Enter your 2FA code into %s/2fa.txt", g_base_dir);
-                int count = 0;
-                while (!file_exists(path.c_str()) && count < 20) {
-                    sleep(3);
-                    count++;
+                int waited = 0;
+                while (!file_exists(path.c_str()) && waited < g_code_timeout) {
+                    sleep(1);
+                    waited++;
                 }
                 if (!file_exists(path.c_str())) {
-                    LOG_WARN("2FA code timeout (60s), aborting login");
+                    LOG_WARN("2FA code timeout (%ds), aborting login", g_code_timeout);
                     exit(1);
                 }
             }

@@ -134,3 +134,6 @@ android/app/src/main/assets/qemu/
 # Python cache
 __pycache__/
 *.pyc
+
+# Rust build output and local scratch
+/target/

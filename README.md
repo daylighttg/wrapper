@@ -46,6 +46,29 @@ Build outputs:
 - `wrapper-lite` — privileged host launcher
 - `wrapper-lite-rootless` — rootless host launcher (user namespaces)
 
+## Multi-account agent (Linux, preview)
+
+`wrapper agent` (Rust, `crates/`) runs one lite process per Apple Music account
+and serves them behind a single wrapper-lite compatible endpoint, with
+wrapper-manager compatible `POST /login` / `POST /logout` and a management API.
+It replaces `wrapper-lite` / `wrapper-lite-rootless` for native Linux use; see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+```bash
+cargo build --release            # target/release/wrapper
+# put the binary next to rootfs/ (with rootfs/system/bin/lite built), then:
+./wrapper agent --host 0.0.0.0 --port 12340
+
+# add an account (two-phase 2FA)
+curl -X POST localhost:12340/api/accounts/login -H 'Content-Type: application/json' \
+  -d '{"username":"you@example.com","password":"..."}'
+# -> data.state == "need2fa": send the code
+curl -X POST localhost:12340/api/logins/<loginId>/code -H 'Content-Type: application/json' \
+  -d '{"code":"123456"}'
+```
+
+Use `--api-token <secret>` when listening on a non-local address.
+
 ## Run natively
 
 ```bash
@@ -120,6 +143,7 @@ All responses use:
 |----------|---------|-------------|
 | `--login user:pass` | — | login, cache tokens, then exit |
 | `--code-from-file` | off | read 2FA code from file |
+| `--code-timeout` | `60` | seconds to wait for `2fa.txt` |
 | `--host` | `127.0.0.1` | listen address |
 | `--port` | `12340` | listen port |
 | `--base-dir` | `data` | data directory |
