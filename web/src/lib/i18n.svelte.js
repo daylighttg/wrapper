@@ -74,8 +74,8 @@ const en = {
   'acc.health.liteDown': 'Not answering',
   'acc.health.checkedAt': 'Key check at {at} ({ms} ms)',
   'acc.health.failures': '{n} failed check(s) in a row',
-  'acc.health.lastKeyOk': 'Last key {time} ago',
-  'acc.health.probed': 'Checked {time} ago ({ms} ms)',
+  'acc.health.lastKeyOk': 'Last key {time}',
+  'acc.health.probed': 'Checked {time} ({ms} ms)',
   'acc.health.restarts': '{n} health restart(s) this hour',
   'acc.probe.hint': 'Request the prefetch key from every running account now',
   'acc.probe.running': 'Checking…',
@@ -162,6 +162,8 @@ const en = {
 
   'common.hostOffline': 'Lost connection to wrapper. Reconnecting…',
   'common.version': 'version {v}',
+  'common.ago': '{time} ago',
+  'common.justNow': 'just now',
 };
 
 const zh = {
@@ -237,8 +239,8 @@ const zh = {
   'acc.health.liteDown': '实例无响应',
   'acc.health.checkedAt': '检查于 {at}（{ms} ms）',
   'acc.health.failures': '连续 {n} 次检查失败',
-  'acc.health.lastKeyOk': '最近取到密钥：{time}前',
-  'acc.health.probed': '{time}前检查（{ms} ms）',
+  'acc.health.lastKeyOk': '最近取到密钥：{time}',
+  'acc.health.probed': '{time}检查（{ms} ms）',
   'acc.health.restarts': '本小时健康重启 {n} 次',
   'acc.probe.hint': '立即向每个运行中的账号请求预取密钥',
   'acc.probe.running': '探测中…',
@@ -325,6 +327,8 @@ const zh = {
 
   'common.hostOffline': '与 wrapper 的连接已断开，正在重连…',
   'common.version': '版本 {v}',
+  'common.ago': '{time}前',
+  'common.justNow': '刚刚',
 };
 
 const dicts = { en, zh };

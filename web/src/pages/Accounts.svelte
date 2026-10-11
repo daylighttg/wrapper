@@ -15,6 +15,7 @@
   });
 
   const up = $derived(engineUp());
+  const ago = (ts) => (now - ts < 5000 ? t('common.justNow') : t('common.ago', { time: duration(now - ts) }));
   const anyRunning = $derived(app.accounts.some((a) => a.state === 'running'));
 
   // Live /key probe of every running account; the results arrive through
@@ -84,9 +85,9 @@
             {#if a.runningSince}<span>{t('acc.uptime', { time: duration(now - a.runningSince) })}</span>{/if}
             {#if a.restarts}<span>{t('acc.restarts', { n: a.restarts })}</span>{/if}
             {#if a.inFlight}<span>{t('acc.inFlight', { n: a.inFlight })}</span>{/if}
-            {#if a.health?.lastKeyOkAt}<span>{t('acc.health.lastKeyOk', { time: duration(now - a.health.lastKeyOkAt) })}</span>{/if}
+            {#if a.health?.lastKeyOkAt}<span>{t('acc.health.lastKeyOk', { time: ago(a.health.lastKeyOkAt) })}</span>{/if}
             {#if a.health?.checkedAt}
-              <span title={a.health.detail || ''}>{t('acc.health.probed', { time: duration(now - a.health.checkedAt), ms: a.health.tookMs ?? '?' })}</span>
+              <span title={a.health.detail || ''}>{t('acc.health.probed', { time: ago(a.health.checkedAt), ms: a.health.tookMs ?? '?' })}</span>
             {/if}
             {#if a.health?.healthRestarts}<span>{t('acc.health.restarts', { n: a.health.healthRestarts })}</span>{/if}
             <span class="mono id">{a.id.slice(0, 8)}</span>
