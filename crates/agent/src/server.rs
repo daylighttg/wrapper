@@ -54,6 +54,7 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/api/logins", get(list_logins))
         .route("/api/logins/{id}", get(get_login).delete(cancel_login))
         .route("/api/logins/{id}/code", post(api_code))
+        .route("/api/system/shutdown", post(system_shutdown))
         .route("/api/logs", get(logs))
         .route("/api/events", get(events));
     if agent.cfg.legacy_management {
@@ -334,6 +335,12 @@ async fn api_restart(State(a): State<AppState>, Path(id): Path<String>) -> Envel
     } else {
         not_found("account")
     }
+}
+
+async fn system_shutdown(State(a): State<AppState>) -> Envelope {
+    tracing::info!("shutdown requested over the API");
+    a.request_shutdown();
+    Envelope::ok(serde_json::Value::Null)
 }
 
 #[derive(Deserialize)]

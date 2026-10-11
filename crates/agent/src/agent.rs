@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::process::Child;
-use tokio::sync::{mpsc, watch, Semaphore};
+use tokio::sync::{mpsc, watch, Notify, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::accounts::{AccountRecord, Layout};
@@ -243,6 +243,7 @@ pub struct Agent {
     save_lock: Mutex<()>,
     startup: Arc<Semaphore>,
     ready: AtomicBool,
+    shutdown: Notify,
 }
 
 enum RunEnd {
@@ -266,6 +267,7 @@ impl Agent {
             save_lock: Mutex::new(()),
             startup,
             ready: AtomicBool::new(false),
+            shutdown: Notify::new(),
         }))
     }
 
@@ -394,6 +396,16 @@ impl Agent {
         if inst.state() != InstanceState::NeedsLogin {
             inst.set_state(InstanceState::Stopped, None);
         }
+    }
+
+    /// Asks the process embedding the agent to shut down (see
+    /// [`Agent::shutdown_requested`]); used by `POST /api/system/shutdown`.
+    pub fn request_shutdown(&self) {
+        self.shutdown.notify_one();
+    }
+
+    pub async fn shutdown_requested(&self) {
+        self.shutdown.notified().await;
     }
 
     pub async fn shutdown(&self) {

@@ -1,66 +1,73 @@
 #!/bin/busybox sh
-/bin/busybox mkdir -p /proc /sys /dev
-/bin/busybox mount -t proc proc /proc
-/bin/busybox mount -t sysfs sysfs /sys
-/bin/busybox mount -t devtmpfs devtmpfs /dev
-/bin/busybox mkdir -p /dev/pts
-/bin/busybox mount -t devpts devpts /dev/pts 2>/dev/null || true
-/bin/busybox hostname wrapper-lite
+# wrapper guest init: bring up devices, network and the data disk, then run
+# the multi-account agent. When the agent exits the guest powers off.
+BB=/bin/busybox
+[ -x "$BB" ] || BB=/usr/bin/busybox
 
-# NIC
-/bin/busybox insmod /e1000.ko 2>/dev/null || true
-/bin/busybox ip link set lo up
-/bin/busybox ip link set eth0 up 2>/dev/null || true
-/bin/busybox ip addr add 10.0.2.15/24 dev eth0 2>/dev/null || true
-/bin/busybox ip route add default via 10.0.2.2 dev eth0 2>/dev/null || true
+$BB mkdir -p /proc /sys /dev /run /etc /data
+$BB mount -t proc proc /proc
+$BB mount -t sysfs sysfs /sys
+$BB mount -t devtmpfs devtmpfs /dev
+$BB mkdir -p /dev/pts
+$BB mount -t devpts devpts /dev/pts 2>/dev/null || true
+$BB hostname wrapper
+
+# NIC (QEMU user networking: guest 10.0.2.15, gateway .2, DNS .3)
+$BB insmod /e1000.ko 2>/dev/null || true
+$BB ip link set lo up
+$BB ip link set eth0 up 2>/dev/null || true
+$BB ip addr add 10.0.2.15/24 dev eth0 2>/dev/null || true
+$BB ip route add default via 10.0.2.2 dev eth0 2>/dev/null || true
+echo "nameserver 10.0.2.3" > /etc/resolv.conf
 
 # Data disk (virtio-blk over PCI + ext4)
-/bin/busybox insmod /virtio.ko 2>/dev/null || true
-/bin/busybox insmod /virtio_ring.ko 2>/dev/null || true
-/bin/busybox insmod /virtio_pci_modern_dev.ko 2>/dev/null || true
-/bin/busybox insmod /virtio_pci_legacy_dev.ko 2>/dev/null || true
-/bin/busybox insmod /virtio_pci.ko 2>/dev/null || true
-/bin/busybox insmod /virtio_blk.ko 2>/dev/null || true
-/bin/busybox insmod /crc16.ko 2>/dev/null || true
-/bin/busybox insmod /crc32c_generic.ko 2>/dev/null || true
-/bin/busybox insmod /jbd2.ko 2>/dev/null || true
-/bin/busybox insmod /mbcache.ko 2>/dev/null || true
-/bin/busybox insmod /ext4.ko 2>/dev/null || true
+for m in virtio virtio_ring virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk \
+         crc16 crc32c_generic jbd2 mbcache ext4 qemu_fw_cfg; do
+    $BB insmod "/$m.ko" 2>/dev/null || true
+done
 
-/bin/busybox mkdir -p /data
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     [ -e /dev/vda ] && break
-    sleep 1
+    $BB sleep 1
 done
-/bin/busybox mount -t ext4 /dev/vda /data 2>/dev/null || echo "[init] data disk mount failed"
 
-# Host-provided lite args, one argument per line.
-/bin/busybox rm -f /data/.lite-qemu-args
-/bin/busybox insmod /qemu_fw_cfg.ko 2>/dev/null || true
-if [ -f /sys/firmware/qemu_fw_cfg/by_name/lite_args/raw ]; then
-    /bin/busybox cat /sys/firmware/qemu_fw_cfg/by_name/lite_args/raw > /data/.lite-qemu-args
+# The host creates a blank disk on first run: format it only when it carries
+# no ext2/3/4 superblock (magic 0xEF53 at byte 1080).
+magic=$($BB dd if=/dev/vda bs=1 skip=1080 count=2 2>/dev/null | $BB od -An -tx1 | $BB tr -d ' \n')
+if [ -e /dev/vda ] && [ "$magic" != "53ef" ]; then
+    echo "[init] formatting the blank data disk"
+    $BB mke2fs -F -L wrapper-data /dev/vda >/dev/null 2>&1 || echo "[init] mke2fs failed"
 fi
+$BB mount -t ext4 /dev/vda /data 2>/dev/null || echo "[init] data disk mount failed; state will not persist"
+# Android app data dir expected by the Apple libraries (ANDROID_DATA=/data).
+$BB mkdir -p /data/data/com.apple.android.music
 
-# Fallback: kernel cmdline base64 (only if base64 applet is available)
-if [ ! -s /data/.lite-qemu-args ] && /bin/busybox base64 --help >/dev/null 2>&1; then
-    for w in $(cat /proc/cmdline); do
+# Extra agent arguments from the host, one per line.
+ARGS=/run/wrapper-args
+: > "$ARGS"
+FW=/sys/firmware/qemu_fw_cfg/by_name/opt/wrapper/args/raw
+if [ -f "$FW" ]; then
+    $BB cat "$FW" > "$ARGS"
+fi
+if [ ! -s "$ARGS" ]; then
+    for w in $($BB cat /proc/cmdline); do
         case "$w" in
-            lite_args_b64=*)
-                echo "${w#lite_args_b64=}" | /bin/busybox base64 -d > /data/.lite-qemu-args
-            ;;
+            wrapper_args_b64=*) echo "${w#wrapper_args_b64=}" | $BB base64 -d > "$ARGS" 2>/dev/null ;;
         esac
     done
 fi
+set --
+while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] && set -- "$@" "$line"
+done < "$ARGS"
+$BB rm -f "$ARGS"
 
-/bin/busybox chmod +x /system/bin/lite /system/bin/linker64 2>/dev/null || true
+$BB chmod +x /system/bin/lite /system/bin/linker64 /bin/wrapper 2>/dev/null || true
+export NO_COLOR=1
 
-if [ -s /data/.lite-qemu-args ]; then
-    echo "[init] wrapper-lite QEMU guest (custom args from file)"
-    LITE_ARGS_FILE=/data/.lite-qemu-args /system/bin/lite
-    lite_rc=$?
-    echo "[init] lite exited with code $lite_rc, powering off..."
-    /bin/busybox poweroff -f
-else
-    echo "[init] wrapper-lite QEMU guest booting..."
-    exec /system/bin/lite --base-dir /data --host 0.0.0.0 --port 8080
-fi
+echo "[init] starting wrapper agent"
+/bin/wrapper agent --runtime direct --state-dir /data --host 0.0.0.0 --port 12340 "$@"
+echo "[init] agent exited ($?); powering off"
+$BB sync
+$BB umount /data 2>/dev/null
+$BB poweroff -f

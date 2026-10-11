@@ -9,6 +9,13 @@ if [[ -z "$BUSYBOX_DEB" && "$(command -v apt-get || true)" != "" ]]; then
     BUSYBOX_DEB="$(ls -1 "${REPO_DIR}"/busybox-static_*_amd64.deb 2>/dev/null | head -1 || true)"
 fi
 OUT_DIR="${REPO_DIR}/qemu"
+# Static (musl) x86_64 build of the wrapper binary; the guest init runs `wrapper agent`.
+WRAPPER_BIN="${WRAPPER_BIN:-${REPO_DIR}/target/x86_64-unknown-linux-musl/release/wrapper}"
+if [[ ! -x "$WRAPPER_BIN" ]]; then
+    echo "[build] ${WRAPPER_BIN} not found; build it with:" >&2
+    echo "        cargo build --release --target x86_64-unknown-linux-musl" >&2
+    exit 1
+fi
 OUT_FILE="${OUT_DIR}/lite-initramfs.cpio.gz"
 KERNEL_FILE="${OUT_DIR}/vmlinuz-lite-qemu"
 
@@ -47,12 +54,18 @@ fi
 
 echo "[build] extracting busybox..."
 dpkg-deb -x "$BUSYBOX_DEB" "$STAGE"
+# Newer Debian packages install it as /usr/bin/busybox; init expects /bin/busybox.
+if [[ ! -x "$STAGE/bin/busybox" && -x "$STAGE/usr/bin/busybox" ]]; then
+    mkdir -p "$STAGE/bin"
+    cp "$STAGE/usr/bin/busybox" "$STAGE/bin/busybox"
+fi
 
 echo "[build] copying rootfs (this may take a moment)..."
 (cd "$ROOTFS_DIR" && tar --exclude=./dev --exclude=./proc --exclude=./data -cf - .) | (cd "$STAGE" && tar -xf -)
 
-echo "[build] installing init..."
+echo "[build] installing init and wrapper..."
 install -m 0755 "${OUT_DIR}/init" "$STAGE/init"
+install -m 0755 "$WRAPPER_BIN" "$STAGE/bin/wrapper"
 
 echo "[build] copying kernel modules..."
 E1000_KO="/lib/modules/${KERNEL_VER}/kernel/drivers/net/ethernet/intel/e1000/e1000.ko"
@@ -94,10 +107,7 @@ else
 fi
 sudo chmod 0644 "$KERNEL_FILE" 2>/dev/null || chmod 0644 "$KERNEL_FILE"
 
-if [[ ! -f "${OUT_DIR}/data.img" ]]; then
-    echo "[build] data disk missing, creating..."
-    "${OUT_DIR}/mkdata.sh"
-fi
-
+# No data.img is shipped: the launcher creates a blank disk and the guest
+# formats it on first boot.
 echo "[build] done:"
-ls -lh "$OUT_FILE" "$KERNEL_FILE" "${OUT_DIR}/data.img"
+ls -lh "$OUT_FILE" "$KERNEL_FILE"

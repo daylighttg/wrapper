@@ -2,8 +2,12 @@
 //!
 //! * `wrapper agent` — multi-account supervisor + aggregated API (Linux: in
 //!   the QEMU guest, or natively with a user-namespace sandbox).
+//! * `wrapper qemu` — boot the agent in a QEMU guest (any host OS).
+//! * `wrapper login` / `wrapper accounts` — manage accounts of a running agent.
 //! * `wrapper sandbox-exec` — internal helper used by the agent to start lite
 //!   inside the rootfs chroot.
+
+mod client;
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -28,6 +32,12 @@ struct Cli {
 enum Cmd {
     /// Run the multi-account agent (Linux only).
     Agent(Box<AgentArgs>),
+    /// Boot the agent inside a QEMU guest and forward its port.
+    Qemu(Box<QemuArgs>),
+    /// Log an account in on a running agent (interactive 2FA).
+    Login(client::LoginArgs),
+    /// List the accounts of a running agent.
+    Accounts(client::ApiArgs),
     /// Internal: run a program chrooted into the wrapper rootfs.
     #[command(hide = true)]
     SandboxExec(SandboxArgs),
@@ -97,6 +107,43 @@ struct AgentArgs {
 }
 
 #[derive(Args)]
+struct QemuArgs {
+    /// Directory with the kernel, initramfs and bin/ [default: <exe dir>/qemu].
+    #[arg(long)]
+    assets_dir: Option<PathBuf>,
+    /// Persistent data disk [default: <assets dir>/data.img].
+    #[arg(long)]
+    data_img: Option<PathBuf>,
+    /// Size in MB of a newly created data disk.
+    #[arg(long, default_value_t = 512)]
+    disk_size: u64,
+    #[arg(long, env = "QEMU_BIN")]
+    qemu_bin: Option<PathBuf>,
+    /// kvm, whpx, hvf, tcg or auto.
+    #[arg(long, default_value = "auto", env = "LITE_QEMU_ACCEL")]
+    accel: String,
+    /// Guest memory in MB (lite needs roughly 150 MB per account).
+    #[arg(long, default_value_t = 1024, env = "MEMORY")]
+    memory: u32,
+    #[arg(long, default_value_t = 2, env = "SMP")]
+    smp: u32,
+    /// Host address the forwarded port binds to.
+    #[arg(long, default_value = "127.0.0.1", env = "LITE_QEMU_HOST")]
+    host: String,
+    #[arg(long, default_value_t = 12340, env = "HOST_PORT")]
+    host_port: u16,
+    /// Management API token for the agent.
+    #[arg(long, env = "WRAPPER_API_TOKEN")]
+    api_token: Option<String>,
+    /// Proxy used inside the guest.
+    #[arg(long, env = "WRAPPER_PROXY")]
+    proxy: Option<String>,
+    /// Extra `wrapper agent` arguments for the guest.
+    #[arg(last = true)]
+    agent_args: Vec<String>,
+}
+
+#[derive(Args)]
 struct SandboxArgs {
     #[arg(long)]
     rootfs: PathBuf,
@@ -112,6 +159,9 @@ fn main() {
     let code = match cli.cmd {
         Cmd::SandboxExec(args) => sandbox_exec(args),
         Cmd::Agent(args) => run_async(run_agent(*args)),
+        Cmd::Qemu(args) => run_async(run_qemu(*args)),
+        Cmd::Login(args) => run_async(client::login(args)),
+        Cmd::Accounts(args) => run_async(client::accounts(args)),
     };
     std::process::exit(code);
 }
@@ -158,7 +208,7 @@ fn init_logging(level: &str) -> std::sync::Arc<EventBus> {
         .with(
             tracing_subscriber::fmt::layer()
                 .with_target(false)
-                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()) && std::env::var_os("NO_COLOR").is_none())
                 .with_writer(std::io::stderr)
                 .with_filter(filter()),
         )
@@ -239,12 +289,48 @@ async fn run_agent(args: AgentArgs) -> anyhow::Result<()> {
     let server = tokio::spawn(wrapper_agent::server::serve(agent.clone(), listener, async {
         let _ = stop_rx.await;
     }));
-    shutdown_signal().await;
+    tokio::select! {
+        _ = shutdown_signal() => {}
+        _ = agent.shutdown_requested() => {}
+    }
     tracing::info!("shutting down");
     agent.shutdown().await;
     let _ = stop_tx.send(());
     // Open SSE streams never finish on their own; do not wait for them forever.
     let _ = tokio::time::timeout(Duration::from_secs(3), server).await;
+    Ok(())
+}
+
+async fn run_qemu(args: QemuArgs) -> anyhow::Result<()> {
+    use wrapper_host::qemu::{run_vm, QemuConfig};
+    let assets = args.assets_dir.unwrap_or_else(|| wrapper_host::exe_dir().join("qemu"));
+    let mut cfg = QemuConfig::new(assets);
+    if let Some(d) = args.data_img {
+        cfg.data_img = d;
+    }
+    cfg.disk_size_mb = args.disk_size;
+    cfg.qemu_bin = args.qemu_bin;
+    cfg.accel = Some(args.accel).filter(|a| a != "auto" && !a.is_empty());
+    cfg.memory_mb = args.memory;
+    cfg.smp = args.smp;
+    cfg.host = args.host;
+    cfg.host_port = args.host_port;
+    cfg.api_token = args.api_token.filter(|t| !t.is_empty());
+    if let Some(p) = args.proxy.filter(|p| !p.is_empty()) {
+        cfg.agent_args.extend(["--proxy".into(), p]);
+    }
+    cfg.agent_args.extend(args.agent_args);
+
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = stop_tx.send(true);
+    });
+    let sink: wrapper_host::qemu::LineSink = std::sync::Arc::new(|line: &str| println!("{line}"));
+    let status = run_vm(&cfg, stop_rx, sink).await?;
+    if !status.success() {
+        bail!("QEMU exited with {status}");
+    }
     Ok(())
 }
 

@@ -172,28 +172,38 @@ impl Agent {
         let source = format!("login:{id}");
         let mut reason: Option<String> = None;
         let mut have_primary = false;
+        let mut on_signal = |sig: Signal, reason: &mut Option<String>| match sig {
+            Signal::Need2fa => self.set_login(
+                &session,
+                LoginState::Need2fa,
+                Some("enter the verification code Apple sent to your devices".into()),
+            ),
+            Signal::LoginError { reason: r, primary } if primary || !have_primary => {
+                *reason = Some(r);
+                have_primary |= primary;
+            }
+            _ => {}
+        };
+        let mut cancelled = false;
         let status = loop {
             tokio::select! {
                 st = child.wait() => break st,
-                Some(sig) = signals.recv() => match sig {
-                    Signal::Need2fa => self.set_login(
-                        &session,
-                        LoginState::Need2fa,
-                        Some("enter the verification code Apple sent to your devices".into()),
-                    ),
-                    Signal::LoginError { reason: r, primary } if primary || !have_primary => {
-                        reason = Some(r);
-                        have_primary |= primary;
-                    }
-                    _ => {}
-                },
+                Some(sig) = signals.recv() => on_signal(sig, &mut reason),
                 _ = &mut cancel => {
                     terminate(&mut child).await;
-                    reason = Some("login cancelled".into());
+                    cancelled = true;
                     break child.wait().await;
                 }
             }
         };
+        // The exit can be observed before the last output lines are parsed:
+        // drain until the pipes close so the failure reason is not lost.
+        while let Ok(Some(sig)) = tokio::time::timeout(Duration::from_secs(2), signals.recv()).await {
+            on_signal(sig, &mut reason);
+        }
+        if cancelled {
+            reason = Some("login cancelled".into());
+        }
         let layout = self.layout().clone();
         let dir = layout.account_dir(&id);
         let _ = std::fs::remove_file(dir.join(".login-args"));

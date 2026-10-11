@@ -69,6 +69,28 @@ curl -X POST localhost:12340/api/logins/<loginId>/code -H 'Content-Type: applica
 
 Use `--api-token <secret>` when listening on a non-local address.
 
+### In QEMU (any OS)
+
+`wrapper qemu` replaces `wrapper-lite-qemu`: it boots the guest, whose init now
+starts `wrapper agent`, and forwards one host port to it. Build the guest with
+the static agent inside:
+
+```bash
+cargo build --release --target x86_64-unknown-linux-musl
+./qemu/build.sh                     # embeds target/x86_64-unknown-linux-musl/release/wrapper
+cargo build --release               # host binary: target/release/wrapper(.exe)
+
+./wrapper qemu --host-port 12340    # assets from <exe dir>/qemu, disk created on first run
+./wrapper login                     # in another terminal: Apple ID, password, 2FA code
+./wrapper accounts
+```
+
+No `data.img` is shipped any more: `wrapper qemu` creates a blank disk
+(`--disk-size`, default 512 MB) and the guest formats it on first boot. An
+existing single-account `data.img` keeps working; its tokens are migrated to
+the first account. Ctrl+C asks the agent to stop its lite processes and power
+the guest off cleanly. Arguments after `--` are passed to the guest agent.
+
 ## Run natively
 
 ```bash

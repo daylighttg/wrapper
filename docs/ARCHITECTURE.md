@@ -25,8 +25,9 @@ host (Windows / macOS / Linux / Android)        QEMU guest, or Linux natively
 ## Delivery phases
 
 1. **Agent core + native Linux** — `crates/agent`, `wrapper agent`,
-   `wrapper sandbox-exec` (this phase).
-2. QEMU launcher in Rust; the guest init starts `wrapper agent`.
+   `wrapper sandbox-exec`.
+2. **QEMU launcher in Rust** — `crates/host`, `wrapper qemu`; the guest init
+   starts `wrapper agent`.
 3. New web GUI (Vite + Svelte) served by `wrapper gui`.
 4. CI, thin Android shell, removal of the C/C++/Go launchers.
 
@@ -35,7 +36,11 @@ host (Windows / macOS / Linux / Android)        QEMU guest, or Linux natively
 | Crate | Purpose |
 |---|---|
 | `crates/agent` (`wrapper-agent`) | Library: account registry, lite supervision, login/2FA, routing, HTTP server, Linux sandbox. |
-| `crates/wrapper` | The `wrapper` binary (CLI). |
+| `crates/host` (`wrapper-host`) | Library: QEMU launcher (asset lookup, acceleration fallback, graceful shutdown). |
+| `crates/wrapper` | The `wrapper` binary: `agent`, `qemu`, `login`, `accounts`, internal `sandbox-exec`. |
+
+The guest contract (fw_cfg arguments, data disk, shutdown) is described in
+[qemu/README.md](../qemu/README.md).
 
 ## The agent
 
@@ -138,6 +143,7 @@ Send `Authorization: Bearer <token>`; `?token=` also works (for SSE).
 | POST | `/api/accounts/{id}/start` · `/stop` · `/restart` | | `AccountView` |
 | DELETE | `/api/accounts/{id}` | | remove account and its data |
 | GET | `/api/logs` | `source`, `after`, `limit` | log entries |
+| POST | `/api/system/shutdown` | | stop all instances and exit (the guest then powers off) |
 | GET | `/api/events` | | SSE: `log`, `account`, `accountRemoved`, `login` |
 
 ### wrapper-manager compatibility
