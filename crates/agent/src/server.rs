@@ -51,6 +51,7 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/api/accounts/{id}/start", post(api_start))
         .route("/api/accounts/{id}/stop", post(api_stop))
         .route("/api/accounts/{id}/restart", post(api_restart))
+        .route("/api/health/probe", post(api_probe))
         .route("/api/logins", get(list_logins))
         .route("/api/logins/{id}", get(get_login).delete(cancel_login))
         .route("/api/logins/{id}/code", post(api_code))
@@ -231,19 +232,21 @@ async fn status(State(a): State<AppState>) -> Envelope {
 /// traffic, cheap enough for a Docker/uptime check). `?probe=1` first runs a
 /// live `/key` request against every running account and answers after they
 /// finish (up to ~45 s); it needs the management token when one is set,
-/// because each probe occupies a lite request slot. HTTP 503 when no account
-/// is healthy.
+/// because each probe occupies a lite request slot. The per-account list is
+/// only included with the token (it names the Apple accounts). HTTP 503 when
+/// no account is healthy.
 async fn health(State(a): State<AppState>, headers: HeaderMap, RawQuery(raw): RawQuery) -> Response {
     let wants_probe = raw
         .as_deref()
         .is_some_and(|q| q.split('&').any(|kv| matches!(kv, "probe=1" | "probe=true" | "deep=1" | "deep=true")));
+    let authorized = authorized(&a, &headers, raw.as_deref());
     if wants_probe {
-        if !authorized(&a, &headers, raw.as_deref()) {
+        if !authorized {
             return Envelope::fail("unauthorized").status(StatusCode::UNAUTHORIZED).into_response();
         }
         a.probe_all().await;
     }
-    let report = a.health_report();
+    let report = a.health_report(authorized);
     if report.healthy {
         Envelope::ok(report).into_response()
     } else {
@@ -253,6 +256,14 @@ async fn health(State(a): State<AppState>, headers: HeaderMap, RawQuery(raw): Ra
 }
 
 // ---------------------------------------------------------- management API
+
+/// `POST /api/health/probe`: `/health?probe=1` for the panel, which reaches
+/// the agent only through `/api` (the GUI proxy adds the token there). The
+/// answer is always `code 0`; `healthy` / `status` carry the verdict.
+async fn api_probe(State(a): State<AppState>) -> Envelope {
+    a.probe_all().await;
+    Envelope::ok(a.health_report(true))
+}
 
 fn bad_request(msg: impl Into<String>) -> Envelope {
     Envelope::fail(msg).status(StatusCode::BAD_REQUEST)

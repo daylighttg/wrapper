@@ -55,6 +55,7 @@ export const agent = {
   stop: (id) => request('POST', `/api/agent/accounts/${id}/stop`),
   restart: (id) => request('POST', `/api/agent/accounts/${id}/restart`),
   remove: (id) => request('DELETE', `/api/agent/accounts/${id}`),
+  probeHealth: () => request('POST', '/api/agent/health/probe'),
 };
 
 /** EventSource that reconnects with backoff; returns a close function. */

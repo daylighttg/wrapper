@@ -15,6 +15,22 @@
   });
 
   const up = $derived(engineUp());
+  const anyRunning = $derived(app.accounts.some((a) => a.state === 'running'));
+
+  // Live /key probe of every running account; the results arrive through
+  // the account events, the summary goes to a toast.
+  let probing = $state(false);
+  async function probe() {
+    probing = true;
+    try {
+      const r = await agent.probeHealth();
+      toast(t(`acc.probe.${r.status}`), r.status === 'ok' ? 'ok' : r.healthy ? 'info' : 'error', 6000);
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      probing = false;
+    }
+  }
 
   async function act(acc, action) {
     if (action === 'remove' && !confirm(t('acc.confirmDelete', { user: acc.username }))) return;
@@ -38,6 +54,9 @@
 <div class="row toolbar">
   <span class="muted">{app.accounts.length ? `${app.accounts.filter((a) => a.state === 'running').length} / ${app.accounts.length}` : ''}</span>
   <span class="spacer"></span>
+  <button disabled={!up || !anyRunning || probing} title={t('acc.probe.hint')} onclick={probe}>
+    <Icon name="key" size={16} />{probing ? t('acc.probe.running') : t('action.probe')}
+  </button>
   <button class="primary" disabled={!up} onclick={() => (dialog = { username: '' })}>
     <Icon name="plus" size={16} />{t('action.addAccount')}
   </button>
@@ -65,10 +84,17 @@
             {#if a.runningSince}<span>{t('acc.uptime', { time: duration(now - a.runningSince) })}</span>{/if}
             {#if a.restarts}<span>{t('acc.restarts', { n: a.restarts })}</span>{/if}
             {#if a.inFlight}<span>{t('acc.inFlight', { n: a.inFlight })}</span>{/if}
+            {#if a.health?.lastKeyOkAt}<span>{t('acc.health.lastKeyOk', { time: duration(now - a.health.lastKeyOkAt) })}</span>{/if}
+            {#if a.health?.checkedAt}
+              <span title={a.health.detail || ''}>{t('acc.health.probed', { time: duration(now - a.health.checkedAt), ms: a.health.tookMs ?? '?' })}</span>
+            {/if}
+            {#if a.health?.healthRestarts}<span>{t('acc.health.restarts', { n: a.health.healthRestarts })}</span>{/if}
             <span class="mono id">{a.id.slice(0, 8)}</span>
           </div>
           {#if a.lastError && a.state !== 'running'}
             <div class="callout {a.state === 'needsLogin' ? 'err' : 'warn'} small err-line">{a.lastError}</div>
+          {:else if a.state === 'running' && ['broken', 'networkDown', 'liteDown'].includes(a.health?.verdict) && a.health.detail}
+            <div class="callout {a.health.verdict === 'broken' ? 'err' : 'warn'} small err-line">{a.health.detail}</div>
           {/if}
         </div>
         <div class="actions row">

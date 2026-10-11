@@ -602,8 +602,12 @@ impl Agent {
         tracing::info!(source = %inst.id, "ready, region {region}");
         // A new process has a new FairPlay context: failures counted against
         // the previous one say nothing about it (wrapper-manager likewise
-        // clears the circuit for a fresh lifecycle).
+        // clears the circuit for a fresh lifecycle). Same for the probe
+        // results: a stale `broken` would keep /health failing for up to
+        // --health-probe-interval, and a carried-over failure count would let
+        // a single failed probe restart the new process unconfirmed.
         inst.circuit_reset();
+        inst.health_new_process();
         if inst.update_record(|r| r.region = region) {
             self.save_registry();
         }

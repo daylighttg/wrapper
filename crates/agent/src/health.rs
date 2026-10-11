@@ -105,7 +105,8 @@ pub struct HealthView {
 
 impl Instance {
     /// Stores a probe result; returns the number of consecutive failed
-    /// probes (network problems and busy slots do not count).
+    /// probes (network problems and busy slots do not count). A working probe
+    /// closes the FairPlay circuit, whoever ran it.
     pub(crate) fn record_probe(&self, report: &ProbeReport) -> u32 {
         let fails = {
             let mut h = self.health.lock().unwrap();
@@ -126,8 +127,21 @@ impl Instance {
             }
             h.consecutive_failures
         };
+        if report.verdict == Verdict::Ok {
+            self.circuit_reset();
+        }
         self.notify();
         fails
+    }
+
+    /// A new lite process: verdict, failure count and last working key of
+    /// the previous one say nothing about it. The restart budget is kept, it
+    /// is what stops a restart loop.
+    pub(crate) fn health_new_process(&self) {
+        let mut h = self.health.lock().unwrap();
+        h.last = None;
+        h.consecutive_failures = 0;
+        h.last_key_ok = None;
     }
 
     /// A real `/key` request succeeded: nothing is wrong with this instance.
@@ -148,8 +162,13 @@ impl Instance {
         self.health.lock().unwrap().last_key_ok.is_some_and(|(t, _)| t.elapsed() < d)
     }
 
+    /// Time since the last probe of this instance, by anyone.
+    fn last_probe_age(&self) -> Option<Duration> {
+        self.health.lock().unwrap().last.as_ref().map(|r| r.checked.elapsed())
+    }
+
     fn probed_within(&self, d: Duration) -> bool {
-        self.health.lock().unwrap().last.as_ref().is_some_and(|r| r.checked.elapsed() < d)
+        self.last_probe_age().is_some_and(|age| age < d)
     }
 
     /// Spends one automatic restart if the budget allows it.
@@ -208,7 +227,10 @@ pub struct HealthReport {
     /// `ok` (every enabled account healthy), `degraded`, `down`, `starting`.
     pub status: &'static str,
     pub ready: bool,
-    pub accounts: Vec<AccountHealth>,
+    /// Per-account detail; left out for callers without the management token
+    /// (it names the Apple accounts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<Vec<AccountHealth>>,
 }
 
 impl Agent {
@@ -281,7 +303,7 @@ impl Agent {
         futures_util::future::join_all(probes).await;
     }
 
-    pub fn health_report(&self) -> HealthReport {
+    pub fn health_report(&self, detailed: bool) -> HealthReport {
         let all = self.instances();
         let accounts: Vec<AccountHealth> = all
             .iter()
@@ -308,7 +330,7 @@ impl Agent {
             (g, n) if g == n => "ok",
             _ => "degraded",
         };
-        HealthReport { healthy: good > 0, status, ready, accounts }
+        HealthReport { healthy: good > 0, status, ready, accounts: detailed.then_some(accounts) }
     }
 
     /// Watches one running instance and returns why it should be restarted.
@@ -320,14 +342,14 @@ impl Agent {
     pub(crate) async fn health_monitor(self: Arc<Self>, inst: Arc<Instance>) -> String {
         let interval = self.cfg.probe_interval;
         let mut wait = interval;
-        let mut last_probe: Option<Instant> = None;
         loop {
             let periodic = tokio::select! {
                 _ = inst.suspect.notified() => false,
                 _ = sleep_or_never(wait) => true,
             };
-            // A burst of log lines (or a confirmation) must not hammer Apple.
-            if let Some(rest) = last_probe.and_then(|t| self.cfg.probe_confirm_gap.checked_sub(t.elapsed())) {
+            // A burst of log lines must not hammer Apple, and a failure found
+            // by `/health?probe=1` must not be "confirmed" a moment later.
+            if let Some(rest) = inst.last_probe_age().and_then(|age| self.cfg.probe_confirm_gap.checked_sub(age)) {
                 tokio::time::sleep(rest).await;
             }
             if periodic && inst.health_failures() == 0 && !inst.circuit_open() && inst.key_ok_within(interval) {
@@ -337,12 +359,8 @@ impl Agent {
             }
 
             let report = self.probe_instance(&inst).await;
-            last_probe = Some(Instant::now());
             match report.verdict {
-                Verdict::Ok => {
-                    inst.circuit_reset();
-                    wait = interval;
-                }
+                Verdict::Ok => wait = interval,
                 Verdict::Busy | Verdict::LiteDown | Verdict::NetworkDown => wait = self.cfg.probe_recheck,
                 Verdict::Broken => {
                     let fails = inst.health_failures();

@@ -118,8 +118,11 @@ unless a real      │      ok ──────────────▶ hea
 * `--health-probe-interval <s>` (default 600, `0` = only on log suspicion and
   `/health?probe=1`).
 * `GET /health` reports the result per account (`verdict`: `ok`, `busy`,
-  `liteDown`, `networkDown`, `broken`); the same `health` object is part of
-  every account in `/api/accounts`.
+  `liteDown`, `networkDown`, `broken`); the per-account list needs the token
+  when one is set (it names the Apple accounts). The same `health` object is
+  part of every account in `/api/accounts`.
+* A freshly started lite begins with a clean record (no verdict, no counted
+  failures); only the restart budget carries over.
 * Probes take a normal request slot, so they never exceed
   `--instance-concurrency`.
 
@@ -179,6 +182,7 @@ Send `Authorization: Bearer <token>`; `?token=` also works (for SSE).
 | GET | `/api/logins` | | `LoginView[]` |
 | POST | `/api/accounts/{id}/start` · `/stop` · `/restart` | | `AccountView` |
 | DELETE | `/api/accounts/{id}` | | remove account and its data |
+| POST | `/api/health/probe` | | probe every running account now (like `/health?probe=1`), returns the `/health` report |
 | GET | `/api/logs` | `source`, `after`, `limit` | log entries |
 | POST | `/api/system/shutdown` | | stop all instances and exit (the guest then powers off) |
 | GET | `/api/events` | | SSE: `log`, `account`, `accountRemoved`, `login` |

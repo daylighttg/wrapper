@@ -343,6 +343,9 @@ async fn health_endpoint_reports_and_gates_live_probes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"]["status"], "ok");
     assert_eq!(hits.load(Ordering::SeqCst), 0);
+    // Without the token it does not name the accounts.
+    assert!(body["data"].get("accounts").is_none(), "{body}");
+    assert!(!body.to_string().contains("good@x.y"));
 
     // A live probe needs the token...
     let (status, _) = call(&agent, get_req("/health?probe=1")).await;
@@ -364,6 +367,16 @@ async fn health_endpoint_reports_and_gates_live_probes() {
     let (_, body) = call(&agent, get_req("/api/accounts?token=s3cret")).await;
     let view = body["data"].as_array().unwrap().iter().find(|a| a["id"] == bad).unwrap().clone();
     assert_eq!(view["health"]["verdict"], "broken");
+
+    // The panel's way in: a management endpoint behind the token.
+    let (status, _) = call(&agent, Request::post("/api/health/probe").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let req = Request::post("/api/health/probe").header("Authorization", "Bearer s3cret").body(Body::empty()).unwrap();
+    let (status, body) = call(&agent, req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["code"], 0);
+    assert_eq!(body["data"]["status"], "degraded");
+    assert_eq!(body["data"]["accounts"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -408,6 +421,47 @@ async fn monitor_restarts_only_a_confirmed_break() {
     assert_eq!(inst.health_view().verdict, Some(Verdict::Ok), "the probe proved the key path works");
     assert!(!monitor.is_finished());
     monitor.abort();
+}
+
+#[tokio::test]
+async fn a_failure_found_by_health_probe_is_confirmed_after_the_gap() {
+    let agent = test_agent_with("mon-probe-all", None, |c| {
+        c.probe_interval = Duration::ZERO;
+        c.probe_confirm_gap = Duration::from_millis(600);
+    });
+    let hits = Arc::new(AtomicUsize::new(0));
+    let id = add_running(&agent, "a@x.y", "jp", fake_key_lite(false, hits.clone()).await);
+    set_apple_reachable(&agent, true).await;
+    let inst = agent.instance(&id).unwrap();
+    let monitor = tokio::spawn(agent.clone().health_monitor(inst.clone()));
+
+    // `/health?probe=1` finds the break and wakes the monitor...
+    agent.probe_all().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // ...which must not count an immediate second probe as the confirmation.
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(!monitor.is_finished());
+    let why = tokio::time::timeout(Duration::from_secs(5), monitor).await.expect("confirmed later").unwrap();
+    assert!(why.contains("2x"), "{why}");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_new_process_starts_with_a_clean_health_record() {
+    let agent = test_agent("new-process", None);
+    let id = add_running(&agent, "a@x.y", "jp", fake_key_lite(false, Arc::new(AtomicUsize::new(0))).await);
+    set_apple_reachable(&agent, true).await;
+    let inst = agent.instance(&id).unwrap();
+    agent.probe_instance(&inst).await;
+    agent.probe_instance(&inst).await;
+    assert!(inst.take_restart_budget(3, Duration::from_secs(3600)));
+    assert!(!inst.is_healthy());
+
+    inst.health_new_process();
+    let v = inst.health_view();
+    assert_eq!((v.verdict, v.consecutive_failures), (None, 0), "the old process's results are gone");
+    assert!(inst.is_healthy(), "a fresh process is not reported broken");
+    assert_eq!(v.health_restarts, 1, "the restart budget survives restarts");
 }
 
 async fn wait_until(mut cond: impl FnMut() -> bool) {
