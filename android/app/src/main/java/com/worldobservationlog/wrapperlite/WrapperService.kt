@@ -218,7 +218,7 @@ class WrapperService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setSmallIcon(R.drawable.ic_stat_wrapper)
             .setContentIntent(open)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.action_stop), stop)
             .setOngoing(true)
