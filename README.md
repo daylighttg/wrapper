@@ -25,17 +25,19 @@ client ──HTTP──▶ wrapper agent ──▶ lite (account A, jp)
 ## Quick start
 
 Download the package for your platform from the
-[nightly builds](https://nightly.link/itouakirai/wrapper/workflows/build-lite/lite?preview):
+[latest release](https://github.com/itouakirai/wrapper/releases/latest)
+(builds of every commit on `lite` are on the
+[nightly page](https://nightly.link/itouakirai/wrapper/workflows/build-lite/lite?preview)):
 
 | Platform | Package |
 |---|---|
-| Windows x86_64 | `wrapper-windows-x86_64.zip` |
-| macOS Apple Silicon | `wrapper-macos-aarch64.zip` |
-| Linux x86_64 (QEMU or native) | `wrapper-linux-x86_64.zip` |
-| Linux aarch64 | `wrapper-linux-aarch64.zip` |
-| Android | `wrapper-android-apk` (APK), or `wrapper-android-aarch64.zip` for Termux |
+| Windows x86_64 | `wrapper-<version>-windows-x86_64.zip` |
+| macOS Apple Silicon | `wrapper-<version>-macos-aarch64.tar.gz` |
+| Linux x86_64 (QEMU or native) | `wrapper-<version>-linux-x86_64.tar.gz` |
+| Linux aarch64 | `wrapper-<version>-linux-aarch64.tar.gz` |
+| Android | `wrapper-<version>-android.apk`, or `wrapper-<version>-android-aarch64.tar.gz` for Termux |
 
-1. Unzip and run `wrapper` (`wrapper.exe` on Windows). The panel opens at
+1. Extract and run `wrapper` (`wrapper.exe` on Windows). The panel opens at
    `http://127.0.0.1:12341`.
 2. Click **Start**. The first QEMU boot creates and formats a data disk.
 3. Open **Accounts → Add account**, enter your Apple ID and password, and the
