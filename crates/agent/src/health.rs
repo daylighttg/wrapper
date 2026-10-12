@@ -6,8 +6,9 @@
 //! "healthy" by that measure, and in-process recovery does not work, so the
 //! only cure is a restart.
 //!
-//! The check that exercises the real path is a `/key` request for the prefetch
-//! key (`adamId=0`), the same thing a client does before playing anything.
+//! The check that exercises the real path is a `/key` request for a real
+//! song's key ([`PROBE_ADAM_ID`] / [`PROBE_KEY_URI`]), the same thing a client
+//! does when it plays something.
 //! Log keywords are only a cheap *suspicion* here; the probe is the judge:
 //!
 //! ```text
@@ -28,9 +29,14 @@ use crate::api::{InstanceState, CODE_FAIL};
 use crate::events::now_millis;
 use crate::router::{InFlight, SLOT_WAIT};
 
-/// The key lite derives its shared FairPlay context from; requesting it needs
-/// no catalog item and exercises the whole key path.
+/// The key lite derives its shared FairPlay context from; only valid with
+/// `adamId=0`.
 pub const PREFETCH_KEY_URI: &str = "skd://itunes.apple.com/P000000000/s1/e1";
+
+/// The song whose key the health probe requests; it exercises the whole key path.
+pub const PROBE_ADAM_ID: &str = "215740514";
+/// The key URI the health probe requests for [`PROBE_ADAM_ID`].
+pub const PROBE_KEY_URI: &str = "skd://itunes.apple.com/p1429258278/c6";
 
 /// Consecutive failed probes (with Apple reachable) before restarting.
 const CONFIRMATIONS: u32 = 2;
@@ -267,7 +273,7 @@ impl Agent {
         let sent = self
             .upstream
             .get(format!("http://127.0.0.1:{port}/key"))
-            .query(&[("adamId", "0"), ("uri", PREFETCH_KEY_URI)])
+            .query(&[("adamId", PROBE_ADAM_ID), ("uri", PROBE_KEY_URI)])
             .timeout(timeout)
             .send()
             .await;

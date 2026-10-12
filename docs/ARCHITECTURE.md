@@ -100,13 +100,13 @@ Running ──"No Active Subscription" / session ended──▶ NeedsLogin
 ### Key-path health (`crates/agent/src/health.rs`)
 
 Those errors are not recoverable inside lite; restarting is. Log lines are
-only a *suspicion*, a `/key?adamId=0` request for the prefetch key is the
+only a *suspicion*, a `/key?adamId=215740514&uri=skd://itunes.apple.com/p1429258278/c6` request is the
 *judge*, and a separate reachability check of Apple's key server (through
 lite's proxy) separates "the network is down" from "lite is broken":
 
 ```
 FairPlay log line ─┐
-every 10 min,      ├─▶ probe /key (adamId=0)
+every 10 min,      ├─▶ probe /key (adamId=215740514)
 unless a real      │      ok ──────────────▶ healthy, circuit closed
 /key succeeded ────┘      failed
                            ├─ Apple key server unreachable ─▶ network problem, no restart

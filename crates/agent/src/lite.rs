@@ -326,7 +326,7 @@ mod tests {
         }
         for l in [
             "adamId: 1422652341, uri: skd://x",
-            "request: GET /key?adamId=0&uri=skd://itunes.apple.com/P000000000/s1/e1",
+            "request: GET /key?adamId=215740514&uri=skd://itunes.apple.com/p1429258278/c6",
             "refreshed context",
             "No Active Subscription",
             "end lease",
