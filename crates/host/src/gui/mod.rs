@@ -54,6 +54,8 @@ pub struct Gui {
     pub engine: Arc<Engine>,
     proxy_http: reqwest::Client,
     downloading: AtomicBool,
+    /// Newer release found by the background check.
+    update: Mutex<Option<Value>>,
 }
 
 type AppState = Arc<Gui>;
@@ -83,6 +85,7 @@ impl Gui {
                 .build()
                 .expect("http client"),
             downloading: AtomicBool::new(false),
+            update: Mutex::new(None),
         })
     }
 
@@ -186,6 +189,7 @@ async fn info(State(g): State<AppState>) -> Response {
         "assetsDir": g.opts.paths.assets_dir,
         "lanAddress": lan_address(),
         "accessProtected": g.opts.access_token.is_some(),
+        "update": g.update.lock().unwrap().clone(),
     }))
 }
 
@@ -467,6 +471,9 @@ pub async fn run(opts: GuiOptions, shutdown: impl std::future::Future<Output = (
     if opts.open_browser {
         open_browser(&url);
     }
+    if std::env::var_os("WRAPPER_NO_UPDATE_CHECK").is_none() {
+        tokio::spawn(check_updates(gui.clone()));
+    }
     if gui.config().autostart {
         if let Err(e) = gui.start_engine().await {
             tracing::warn!("autostart failed: {e}");
@@ -490,6 +497,37 @@ pub async fn run(opts: GuiOptions, shutdown: impl std::future::Future<Output = (
 }
 
 /// Default data directory: next to the executable when writable.
+/// Looks for a newer release at start-up and then daily; only reports it
+/// (installing needs the engine stopped: `wrapper update`).
+async fn check_updates(gui: AppState) {
+    use crate::update;
+    let repo = std::env::var("WRAPPER_UPDATE_REPO").unwrap_or_else(|_| update::DEFAULT_REPO.into());
+    loop {
+        let cfg = gui.config();
+        let src = update::Source {
+            mirror: cfg.mirror,
+            proxy: Some(cfg.proxy.clone()).filter(|p| !p.is_empty()),
+            ..update::Source::new(&repo)
+        };
+        match src.manifest(None).await {
+            Ok((m, _)) if update::is_newer(&m.version, env!("CARGO_PKG_VERSION")) => {
+                let known = gui.update.lock().unwrap().as_ref().and_then(|u| u["version"].as_str().map(str::to_string));
+                if known.as_deref() != Some(m.version.as_str()) {
+                    gui.engine.console_line(&format!(
+                        "[gui] wrapper {} is available; stop the engine and run `wrapper update`",
+                        m.version
+                    ));
+                    *gui.update.lock().unwrap() = Some(json!({ "version": m.version, "tag": m.tag, "notes": m.notes }));
+                    gui.engine.emit(HostEvent::Update { version: m.version });
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::debug!("update check failed: {e:#}"),
+        }
+        tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+    }
+}
+
 pub fn default_data_dir() -> PathBuf {
     crate::exe_dir()
 }

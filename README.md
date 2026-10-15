@@ -103,6 +103,7 @@ User namespaces need `seccomp`/`apparmor` relaxed (as in `compose.yaml`) or
 | `wrapper agent` | Run the agent (Linux; `--runtime auto\|direct\|sandbox\|sandbox-privileged`, `--proxy`, `--api-token`, `--device-info`, `--instance-concurrency`, …) |
 | `wrapper login` | Add or re-login an account on a running agent, with interactive 2FA |
 | `wrapper accounts` | List accounts and their state |
+| `wrapper update` | Upgrade to the latest release, only downloading what changed (`--check`, `-y`, `--version <tag>`, `--only bin,guest,qemu,rootfs`, `--mirror`); see [docs/UPDATING.md](docs/UPDATING.md) |
 
 `wrapper <command> --help` lists every option.
 

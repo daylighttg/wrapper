@@ -20,6 +20,10 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+flate2 = "1"
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

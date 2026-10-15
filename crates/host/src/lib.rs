@@ -4,6 +4,7 @@
 pub mod gui;
 pub mod platform;
 pub mod qemu;
+pub mod update;
 
 use std::path::{Path, PathBuf};
 

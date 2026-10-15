@@ -1,0 +1,4 @@
+# Ed25519 public key (64 hex characters) that release manifests are signed
+# with; compiled into `wrapper` so `wrapper update` rejects anything else.
+# Leave it without a key line to ship unsigned releases (hash checks only).
+# Generating a key pair: see docs/UPDATING.md.

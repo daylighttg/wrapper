@@ -5,10 +5,12 @@
 //! * `wrapper gui` (default) — web panel that runs the agent in QEMU or natively.
 //! * `wrapper qemu` — boot the agent in a QEMU guest (any host OS).
 //! * `wrapper login` / `wrapper accounts` — manage accounts of a running agent.
+//! * `wrapper update` — upgrade this install from GitHub releases.
 //! * `wrapper sandbox-exec` — internal helper used by the agent to start lite
 //!   inside the rootfs chroot.
 
 mod client;
+mod update;
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -42,6 +44,8 @@ enum Cmd {
     Login(client::LoginArgs),
     /// List the accounts of a running agent.
     Accounts(client::ApiArgs),
+    /// Upgrade this install (binary, QEMU guest, rootfs) from GitHub releases.
+    Update(update::UpdateArgs),
     /// Internal: run a program chrooted into the wrapper rootfs.
     #[command(hide = true)]
     SandboxExec(SandboxArgs),
@@ -197,6 +201,7 @@ fn main() {
         Cmd::Qemu(args) => run_async(run_qemu(*args)),
         Cmd::Login(args) => run_async(client::login(args)),
         Cmd::Accounts(args) => run_async(client::accounts(args)),
+        Cmd::Update(args) => run_async(update::run(args)),
     };
     std::process::exit(code);
 }

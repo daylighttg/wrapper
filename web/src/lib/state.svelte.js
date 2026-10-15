@@ -140,7 +140,7 @@ export async function init() {
       else if (ev.type === 'download') {
         app.download = ev.progress;
         if (ev.progress.status === 'done' || ev.progress.status === 'error') refreshInfo();
-      }
+      } else if (ev.type === 'update') refreshInfo();
     },
     async (up) => {
       const was = app.hostConnected;

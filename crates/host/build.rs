@@ -1,5 +1,8 @@
 //! Embeds the built web panel (`web/dist`, or `$WRAPPER_WEB_DIST`) into the
 //! binary. Without a build a placeholder page explains how to make one.
+//!
+//! Also embeds the release signing key from `update-key.pub` (or
+//! `$WRAPPER_UPDATE_PUBKEY`) for `wrapper update`.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -27,6 +30,8 @@ fn main() {
         .unwrap_or_else(|| manifest.join("../../web/dist"));
     println!("cargo:rerun-if-changed={}", dist.display());
 
+    embed_update_key(&manifest);
+
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let mut files = Vec::new();
     collect(&dist, &dist, &mut files);
@@ -52,4 +57,21 @@ fn main() {
     }
     code.push_str("];\n");
     std::fs::write(out_dir.join("web_assets.rs"), code).unwrap();
+}
+
+/// First non-comment line of `update-key.pub`: hex Ed25519 public key; none
+/// means releases are not signed and `wrapper update` checks hashes only.
+fn embed_update_key(manifest: &Path) {
+    println!("cargo:rerun-if-env-changed=WRAPPER_UPDATE_PUBKEY");
+    let file = manifest.join("update-key.pub");
+    println!("cargo:rerun-if-changed={}", file.display());
+    let key = std::env::var("WRAPPER_UPDATE_PUBKEY").ok().or_else(|| {
+        let text = std::fs::read_to_string(&file).ok()?;
+        text.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_string)
+    });
+    let key = key.unwrap_or_default().trim().to_ascii_lowercase();
+    if !key.is_empty() && (key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit())) {
+        panic!("update signing key must be 64 hex characters, got {key:?}");
+    }
+    println!("cargo:rustc-env=WRAPPER_UPDATE_PUBKEY={key}");
 }

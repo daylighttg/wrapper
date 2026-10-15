@@ -59,6 +59,11 @@
       <div>
         <div class="name">wrapper</div>
         {#if app.info}<div class="ver">{t('common.version', { v: app.info.version })}</div>{/if}
+        {#if app.info?.update}
+          <a class="upd" href={app.info.update.notes} target="_blank" rel="noreferrer" title={t('common.updateHint')}>
+            {t('common.updateAvailable', { v: app.info.update.version })}
+          </a>
+        {/if}
       </div>
     </div>
     <nav>
@@ -140,6 +145,11 @@
   .brand .ver {
     font-size: 11.5px;
     color: var(--muted);
+  }
+  .brand .upd {
+    display: block;
+    font-size: 11.5px;
+    color: var(--accent);
   }
 
   nav {

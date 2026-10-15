@@ -53,6 +53,8 @@ pub enum HostEvent {
     Console(ConsoleLine),
     Status { status: EngineStatus },
     Download { progress: DownloadProgress },
+    /// A newer release was found (`/api/host/info` has the details).
+    Update { version: String },
 }
 
 #[derive(Clone, Debug)]

@@ -162,6 +162,8 @@ const en = {
 
   'common.hostOffline': 'Lost connection to wrapper. Reconnecting…',
   'common.version': 'version {v}',
+  'common.updateAvailable': '{v} available',
+  'common.updateHint': 'Stop the engine and run `wrapper update` to upgrade',
   'common.ago': '{time} ago',
   'common.justNow': 'just now',
 };
@@ -327,6 +329,8 @@ const zh = {
 
   'common.hostOffline': '与 wrapper 的连接已断开，正在重连…',
   'common.version': '版本 {v}',
+  'common.updateAvailable': '新版本 {v}',
+  'common.updateHint': '停止引擎后运行 `wrapper update` 即可升级',
   'common.ago': '{time}前',
   'common.justNow': '刚刚',
 };

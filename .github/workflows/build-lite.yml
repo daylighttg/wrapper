@@ -306,6 +306,28 @@ jobs:
           pattern: wrapper-*
           path: release
           merge-multiple: true
+      # Components + manifest.json for `wrapper update`.
+      - name: Build update manifest
+        run: python3 scripts/release-manifest.py --tag "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" release
+      # The key must match crates/host/update-key.pub, which the binaries
+      # embed: a mismatch would make every `wrapper update` refuse.
+      - name: Sign update manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          EXPECTED="$(grep -v '^#' crates/host/update-key.pub | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+          if [ -z "$EXPECTED" ]; then
+            echo "::warning::crates/host/update-key.pub has no key; publishing an unsigned manifest"
+            exit 0
+          fi
+          [ -n "$UPDATE_SIGNING_KEY" ] || { echo "::error::UPDATE_SIGNING_KEY secret is not set"; exit 1; }
+          umask 077
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/update-key.pem"
+          ACTUAL="$(openssl pkey -in "$RUNNER_TEMP/update-key.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')"
+          [ "$ACTUAL" = "$EXPECTED" ] || { echo "::error::UPDATE_SIGNING_KEY does not match update-key.pub"; exit 1; }
+          openssl pkeyutl -sign -rawin -inkey "$RUNNER_TEMP/update-key.pem" \
+            -in release/manifest.json -out release/manifest.json.sig
+          rm -f "$RUNNER_TEMP/update-key.pem"
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
