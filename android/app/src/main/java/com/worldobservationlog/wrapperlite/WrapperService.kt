@@ -114,7 +114,7 @@ class WrapperService : Service() {
                 failure.value = null
                 proc.inputStream.bufferedReader().forEachLine { line ->
                     Log.i(TAG, line)
-                    // "wrapper 3.0.1 panel: http://127.0.0.1:12341/?token=..."
+                    // "wrapper 3.0.2 panel: http://127.0.0.1:12341/?token=..."
                     Regex("panel: (http\\S+)").find(line)?.let {
                         panel.value = it.groupValues[1]
                         updateNotification(getString(R.string.status_running))
