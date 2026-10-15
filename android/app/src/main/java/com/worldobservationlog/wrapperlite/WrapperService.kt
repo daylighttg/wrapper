@@ -36,7 +36,6 @@ class WrapperService : Service() {
         const val CHANNEL_ID = "wrapper_service"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "com.worldobservationlog.wrapperlite.STOP"
-        const val PANEL_PORT = 12341
 
         private val panel = MutableStateFlow<String?>(null)
         private val failure = MutableStateFlow<String?>(null)
@@ -101,8 +100,9 @@ class WrapperService : Service() {
                 val pb = ProcessBuilder(
                     binary.absolutePath, "gui",
                     "--no-browser",
-                    "--host", "127.0.0.1",
-                    "--port", PANEL_PORT.toString(),
+                    // Panel and API share one port (Settings -> Network,
+                    // default 127.0.0.1:12340). The access token keeps other
+                    // apps on this device out of the panel.
                     "--data-dir", filesDir.absolutePath,
                     "--assets-dir", File(filesDir, "qemu").absolutePath,
                     "--access-token", token,
@@ -114,7 +114,7 @@ class WrapperService : Service() {
                 failure.value = null
                 proc.inputStream.bufferedReader().forEachLine { line ->
                     Log.i(TAG, line)
-                    // "wrapper 3.0.2 panel: http://127.0.0.1:12341/?token=..."
+                    // "wrapper 3.1.0 panel: http://127.0.0.1:12340/?token=..."
                     Regex("panel: (http\\S+)").find(line)?.let {
                         panel.value = it.groupValues[1]
                         updateNotification(getString(R.string.status_running))

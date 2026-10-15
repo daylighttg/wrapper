@@ -26,6 +26,13 @@
       form = structuredClone(res.config);
       needsRestart = res.restartRequired;
       toast(t('set.saved'), 'ok');
+      // The panel moved with the API (new port, or no longer on this host).
+      const moved = new URL(res.apiUrl);
+      if (moved.port !== location.port && ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {
+        toast(t('set.moved', { url: res.apiUrl }), 'info', 6000);
+        setTimeout(() => (location.href = `${res.apiUrl}/#/settings`), 1500);
+        return;
+      }
       refreshInfo();
     } catch (err) {
       toast(err.message, 'error', 6000);
@@ -107,6 +114,7 @@
           <span>{t('set.apiPort')}</span>
           <input type="number" min="1" max="65535" bind:value={form.apiPort} />
         </label>
+        <div class="hint wide">{t('set.listenHint')}</div>
         <label class="field wide">
           <span>{t('set.proxy')}</span>
           <input bind:value={form.proxy} placeholder="http://127.0.0.1:7890" />

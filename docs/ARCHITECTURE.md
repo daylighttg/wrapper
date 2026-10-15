@@ -66,7 +66,9 @@ start and prints the `chown` command to run.
 
 ```
 <state>/                    guest: /data   native: <rootfs>/data
-├── accounts.json           [{id, username, region, enabled, deviceInfo?, createdAt}]
+├── accounts.json           [{id, username, region, enabled, deviceInfo?, createdAt, ownerKeyHash?}]
+├── agent.json              runtime settings: publicMode, maxAccounts, publicNotice, publicSalt
+├── stats.json              request counters (per account and endpoint; per day, 30 days)
 ├── data/                   Android app data shared by all instances (ANDROID_DATA)
 └── accounts/<id>/          lite --base-dir of one account
     ├── mpl_db/
@@ -161,6 +163,67 @@ that list the language (Apple's `/v1/storefronts`, `supportedLanguageTags`) are
 probed first, because another store may have the lyrics but not their
 translations; the rest only if none of those has them.
 
+### Statistics
+
+Every routed request is counted by endpoint (`m3u8`, `key`, `lyrics`,
+`webplayback`, `license`) as ok (`code 0`) or failed, for the account that
+answered (requests no account could serve count only in the totals), plus
+per-day totals for 30 days. Validation errors are not counted, nor are health
+probes. The counters live in memory and are written to `stats.json` every
+minute and at shutdown.
+
+### Backup and restore (`crates/agent/src/backup.rs`)
+
+```
+wrapper-backup/
+├── manifest.json        {format: 1, version, createdAt, accounts: [{id, username, region}]}
+├── accounts.json, agent.json, stats.json
+└── accounts/<id>/       the lite base dir, without 2fa.txt / .login-args / *.tmp
+```
+
+* `GET /api/backup` streams the `.tar.gz` (written on a blocking thread into
+  a channel; nothing is buffered whole). Files are read whole before they are
+  added, so lite rewriting one meanwhile cannot corrupt the archive.
+* `POST /api/restore?mode=merge|replace&settings=1` (body: the archive) or
+  `POST /api/restore/pull {url, token, mode, settings}` (the agent downloads
+  `<url>/api/backup` itself) unpack into `<state>/.restore-<random>/`. Only
+  the files above are extracted; absolute paths, `..`, links and devices are
+  refused, and a newer `format` is rejected. Then, per account: stop it, swap
+  its dir for the restored one, update the registry, start it. `replace`
+  first removes accounts that are not in the backup. A restore refuses to run
+  while logins are in progress.
+* The shared Android data dir (`<state>/data`) holds no account state and is
+  not part of a backup. Paths are the same in the guest and the native
+  sandbox (`/data/accounts/<id>`), so backups move freely between them.
+
+## Public mode
+
+`agent.json` → `publicMode` (needs a management token: without one every
+visitor would be an administrator). The public API is open:
+
+| Method | Path | Body | Result |
+|---|---|---|---|
+| GET | `/api/public/overview` | | `{publicMode, notice, maxAccounts, activeAccounts, accepting, regions, accounts: [{ref, name, region, state, verdict, usage}], stats}` (only `{publicMode: false}` when off) |
+| POST | `/api/public/login` | `{username, password}` | `{ticket, ref, name, ownerKey, login: {state, message}}` |
+| GET / DELETE | `/api/public/login/{ticket}` | | login state / cancel |
+| POST | `/api/public/login/{ticket}/code` | `{code}` | login state (5 tries per ticket) |
+| POST | `/api/public/logout` | `{username, key}` | removes the account if the key matches |
+
+* `name` is masked (`jo***@g***.com`); `ref` is a salted hash of the account
+  id (the id itself is derived from the Apple ID and could be checked against
+  a guess).
+* A login is refused when the account already exists and is not `needsLogin`,
+  when `MAX_PENDING_LOGINS` (2) logins run, when `maxAccounts` active
+  accounts (enabled and not `needsLogin`) plus pending logins of new accounts
+  are reached, or after 6 logins per client address in 30 minutes. The client
+  address is the TCP peer, or behind a proxy on the same machine (the GUI)
+  the last non-loopback `X-Forwarded-For` entry.
+* `ownerKey` is random; only its SHA-256 is stored (`ownerKeyHash`), on the
+  account once the login succeeds. A public re-login issues a new key; an
+  admin login keeps the owner's.
+* The 2FA step is bound to the random `ticket`, not to the account id, so
+  nobody can feed codes into someone else's login.
+
 ## HTTP API
 
 Responses use the lite envelope `{"code", "msg", "data"}`. Agent-generated
@@ -174,7 +237,10 @@ shape plus extras).
 
 ### Management API (`--api-token` protects these when set)
 
-Send `Authorization: Bearer <token>`; `?token=` also works (for SSE).
+Send `Authorization: Bearer <token>`; `?token=` also works (for SSE), as
+does the `wrapper_admin` cookie set by `POST /api/session {token}` (the
+panel's sign-in; `DELETE` signs out). `GET /api/whoami` tells the panel who
+it is talking to.
 
 | Method | Path | Body / query | Result |
 |---|---|---|---|
@@ -189,32 +255,59 @@ Send `Authorization: Bearer <token>`; `?token=` also works (for SSE).
 | POST | `/api/health/probe` | | probe every running account now (like `/health?probe=1`), returns the `/health` report |
 | GET | `/api/logs` | `source`, `after`, `limit` | log entries |
 | POST | `/api/system/shutdown` | | stop all instances and exit (the guest then powers off) |
+| GET / PUT | `/api/settings` | `{publicMode?, maxAccounts?, publicNotice?}` | public-mode settings (saved to `agent.json`) |
+| GET | `/api/stats` | | `{summary: {since, total, today, daily}, accounts: {<id>: {total, today, lastUsed}}}` |
+| GET | `/api/backup` | | `.tar.gz` download |
+| POST | `/api/restore` | archive; `?mode=merge\|replace&settings=1` | restore report |
+| POST | `/api/restore/pull` | `{url, token, mode, settings}` | restore report |
 | GET | `/api/events` | | SSE: `log`, `account`, `accountRemoved`, `login` |
 
 ## The GUI (`wrapper gui`)
 
+One port (Settings → Network, default `127.0.0.1:12340`) serves everything;
+the agent listens on a private loopback port that only the GUI talks to (the
+QEMU port forward, or the native agent's `--port`).
+
 ```
-browser ──▶ wrapper gui (127.0.0.1:12341)
-             ├─ /api/host/*     settings, engine start/stop, console, package download
-             ├─ /api/agent/*    ─▶ agent /api/*  (adds the management token)
-             ├─ /api/public/*   ─▶ agent resource API (API tester)
-             └─ /*              embedded single-page app
+client / browser ──▶ wrapper gui (apiHost:apiPort)
+                      ├─ /m3u8 /key /lyrics /webplayback /license /status /health /login /logout
+                      │                    ─▶ agent, unchanged (the client's own Authorization)
+                      ├─ /api/public/*     ─▶ agent public mode (open)
+                      ├─ /api/whoami, /api/session   GUI sign-in
+                      ├─ /api/host/*       settings, engine, console, package download   (admin)
+                      ├─ /api/*            ─▶ agent management API, with its token          (admin)
+                      └─ /*                embedded single-page app
 ```
+
+* **Admin** = a request from this machine (loopback peer, a loopback `Host`,
+  no `X-Forwarded-For` / `Forwarded` / `X-Real-IP` from a local reverse proxy,
+  no cross-site `Origin` / `Sec-Fetch-Site`), or one carrying the management
+  token (`wrapper_admin` cookie, Bearer, `?token=`). With `--access-token`
+  (Android) every request needs a token.
+* Responses of the admin API lose the agent's CORS headers, so other sites
+  cannot read them; the resource and public API keep them.
+* Request and response bodies are streamed (backups).
+* Changing the listen address rebinds at once (no engine restart); moving
+  `127.0.0.1:p` to `0.0.0.0:p` releases the old socket first.
+* The panel decides what to show from `/api/whoami`: the admin panel, the
+  public page (public mode on), or the sign-in form. A headless agent serves
+  the same panel on its API port (`mode: "agent"`: no engine, settings or
+  console).
 
 * Engines: **QEMU** (any OS; `crates/host/src/qemu.rs`) or **native** (Linux
   x86_64; spawns `wrapper agent --runtime sandbox`).
 * Settings live in `<data dir>/wrapper-gui.json` (default: next to the
   binary). A random management token is generated on first run and passed to
   the agent, so `/api` is never open on the public port.
-* Listening on a non-loopback address requires an access token (generated
-  and printed as `?token=…`, then kept in a cookie).
+* When listening on a non-loopback address, wrapper prints the panel URL with
+  `?token=<management token>`; opening it sets the cookie.
 * Children die with the GUI: `PR_SET_PDEATHSIG` on Linux, a kill-on-close job
   object on Windows; closing the console window triggers a graceful stop.
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/host/info` | platform, component status, package URL |
-| GET / PUT | `/api/host/config` | settings (PUT merges fields; an empty `apiToken` regenerates it) |
+| GET / PUT | `/api/host/config` | settings (PUT merges fields; an empty `apiToken` regenerates it; a new `apiHost` / `apiPort` applies at once) |
 | GET | `/api/host/status` | engine state |
 | POST | `/api/host/start` · `/stop` · `/restart` | control the engine |
 | GET | `/api/host/console` | QEMU / agent console lines |
@@ -230,7 +323,8 @@ it is extracted to the executable native library dir):
 * `WrapperService` (foreground service, wake + Wi-Fi locks) unpacks the
   bundled Termux QEMU and guest files to `filesDir/qemu` once per APK version,
   then runs `libwrapper.so gui --data-dir filesDir --assets-dir filesDir/qemu
-  --access-token <random>` and restarts it if it dies.
+  --access-token <random>` and restarts it if it dies. The panel and API use
+  the port from the settings (default 12340).
 * `MainActivity` is a WebView on the panel URL that wrapper prints.
 * `targetSdk` stays 28 so QEMU can be executed from `filesDir`.
 

@@ -1,4 +1,6 @@
-// Thin client for the GUI backend (/api/host) and the proxied agent (/api/agent).
+// Thin client for the front door: the GUI backend (/api/host), the agent's
+// management API (/api, proxied with its token by the GUI or served by a
+// headless agent) and public mode (/api/public).
 
 export class ApiError extends Error {
   constructor(message, status) {
@@ -7,9 +9,11 @@ export class ApiError extends Error {
   }
 }
 
-async function request(method, path, body) {
+async function request(method, path, body, raw = false) {
   const init = { method, headers: {} };
-  if (body !== undefined) {
+  if (raw) {
+    init.body = body;
+  } else if (body !== undefined) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
@@ -31,6 +35,12 @@ async function request(method, path, body) {
   return json.data;
 }
 
+export const session = {
+  whoami: () => request('GET', '/api/whoami'),
+  signIn: (token) => request('POST', '/api/session', { token }),
+  signOut: () => request('DELETE', '/api/session'),
+};
+
 export const host = {
   info: () => request('GET', '/api/host/info'),
   config: () => request('GET', '/api/host/config'),
@@ -44,18 +54,33 @@ export const host = {
 };
 
 export const agent = {
-  overview: () => request('GET', '/api/agent/overview'),
-  logs: (after) => request('GET', `/api/agent/logs?limit=2000${after ? `&after=${after}` : ''}`),
+  overview: () => request('GET', '/api/overview'),
+  logs: (after) => request('GET', `/api/logs?limit=2000${after ? `&after=${after}` : ''}`),
   login: (username, password, deviceInfo) =>
-    request('POST', '/api/agent/accounts/login', { username, password, deviceInfo: deviceInfo || undefined }),
-  code: (id, code) => request('POST', `/api/agent/logins/${id}/code`, { code }),
-  loginStatus: (id) => request('GET', `/api/agent/logins/${id}`),
-  cancelLogin: (id) => request('DELETE', `/api/agent/logins/${id}`),
-  start: (id) => request('POST', `/api/agent/accounts/${id}/start`),
-  stop: (id) => request('POST', `/api/agent/accounts/${id}/stop`),
-  restart: (id) => request('POST', `/api/agent/accounts/${id}/restart`),
-  remove: (id) => request('DELETE', `/api/agent/accounts/${id}`),
-  probeHealth: () => request('POST', '/api/agent/health/probe'),
+    request('POST', '/api/accounts/login', { username, password, deviceInfo: deviceInfo || undefined }),
+  code: (id, code) => request('POST', `/api/logins/${id}/code`, { code }),
+  loginStatus: (id) => request('GET', `/api/logins/${id}`),
+  cancelLogin: (id) => request('DELETE', `/api/logins/${id}`),
+  start: (id) => request('POST', `/api/accounts/${id}/start`),
+  stop: (id) => request('POST', `/api/accounts/${id}/stop`),
+  restart: (id) => request('POST', `/api/accounts/${id}/restart`),
+  remove: (id) => request('DELETE', `/api/accounts/${id}`),
+  probeHealth: () => request('POST', '/api/health/probe'),
+  stats: () => request('GET', '/api/stats'),
+  settings: () => request('GET', '/api/settings'),
+  saveSettings: (patch) => request('PUT', '/api/settings', patch),
+  restore: (file, mode, settings) =>
+    request('POST', `/api/restore?mode=${mode}&settings=${settings ? 1 : 0}`, file, true),
+  pull: (url, token, mode, settings) => request('POST', '/api/restore/pull', { url, token, mode, settings }),
+};
+
+export const pub = {
+  overview: () => request('GET', '/api/public/overview'),
+  login: (username, password) => request('POST', '/api/public/login', { username, password }),
+  status: (ticket) => request('GET', `/api/public/login/${ticket}`),
+  code: (ticket, code) => request('POST', `/api/public/login/${ticket}/code`, { code }),
+  cancel: (ticket) => request('DELETE', `/api/public/login/${ticket}`),
+  logout: (username, key) => request('POST', '/api/public/logout', { username, key }),
 };
 
 /** EventSource that reconnects with backoff; returns a close function. */

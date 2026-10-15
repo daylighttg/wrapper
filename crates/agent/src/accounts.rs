@@ -3,6 +3,8 @@
 //! ```text
 //! <state>/                 = what lite sees as /data
 //! ├── accounts.json        registry (this module)
+//! ├── agent.json           runtime settings (`settings`)
+//! ├── stats.json           request counters (`stats`)
 //! └── accounts/<id>/       per-account lite --base-dir
 //!     ├── mpl_db/
 //!     ├── MUSIC_TOKEN, STOREFRONT_ID, DEV_TOKEN, token_cache.json, ANDROID_ID
@@ -16,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountRecord {
     pub id: String,
@@ -30,6 +32,10 @@ pub struct AccountRecord {
     pub device_info: Option<String>,
     #[serde(default)]
     pub created_at: i64,
+    /// SHA-256 (hex) of the key handed out when the account was added
+    /// through the public page; it lets that user remove the account again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_key_hash: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -61,6 +67,14 @@ pub struct Layout {
 impl Layout {
     pub fn registry_path(&self) -> PathBuf {
         self.state_dir.join("accounts.json")
+    }
+
+    pub fn settings_path(&self) -> PathBuf {
+        self.state_dir.join("agent.json")
+    }
+
+    pub fn stats_path(&self) -> PathBuf {
+        self.state_dir.join("stats.json")
     }
 
     pub fn account_dir(&self, id: &str) -> PathBuf {
@@ -155,6 +169,7 @@ impl Layout {
             enabled: true,
             device_info: None,
             created_at: now,
+            owner_key_hash: None,
         }))
     }
 }
@@ -170,6 +185,9 @@ const LEGACY_KEEP: &[&str] = &[
     "lost+found",
     "2fa.txt",
     "agent.json",
+    "agent.json.tmp",
+    "stats.json",
+    "stats.json.tmp",
 ];
 
 fn move_path(from: &Path, to: &Path) -> io::Result<()> {
@@ -223,8 +241,8 @@ mod tests {
             username: "a@b.c".into(),
             region: "jp".into(),
             enabled: true,
-            device_info: None,
             created_at: 1,
+            ..Default::default()
         };
         l.save(std::slice::from_ref(&rec)).unwrap();
         assert_eq!(l.load(), vec![rec]);

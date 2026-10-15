@@ -5,6 +5,7 @@
 //! * `wrapper gui` (default) — web panel that runs the agent in QEMU or natively.
 //! * `wrapper qemu` — boot the agent in a QEMU guest (any host OS).
 //! * `wrapper login` / `wrapper accounts` — manage accounts of a running agent.
+//! * `wrapper backup` / `wrapper restore` — move accounts between machines.
 //! * `wrapper update` — upgrade this install from GitHub releases.
 //! * `wrapper sandbox-exec` — internal helper used by the agent to start lite
 //!   inside the rootfs chroot.
@@ -44,6 +45,10 @@ enum Cmd {
     Login(client::LoginArgs),
     /// List the accounts of a running agent.
     Accounts(client::ApiArgs),
+    /// Download a backup of every account (tokens, settings, statistics).
+    Backup(client::BackupArgs),
+    /// Restore a backup file, or migrate straight from another wrapper.
+    Restore(client::RestoreArgs),
     /// Upgrade this install (binary, QEMU guest, rootfs) from GitHub releases.
     Update(update::UpdateArgs),
     /// Internal: run a program chrooted into the wrapper rootfs.
@@ -117,15 +122,27 @@ struct AgentArgs {
     /// Agent log level (trace, debug, info, warn, error).
     #[arg(long, default_value = "info", env = "WRAPPER_LOG")]
     log_level: String,
+    /// Turn public mode on (anyone may add their own account; needs
+    /// --api-token). Otherwise the setting saved in agent.json applies.
+    #[arg(long, env = "WRAPPER_PUBLIC")]
+    public: bool,
+    /// Most active accounts public mode accepts (0: no limit); saved.
+    #[arg(long, env = "WRAPPER_MAX_ACCOUNTS")]
+    max_accounts: Option<u32>,
+    /// Do not serve the web panel on the API port.
+    #[arg(long)]
+    no_ui: bool,
 }
 
 #[derive(Args, Default)]
 struct GuiArgs {
-    /// Address the panel listens on.
-    #[arg(long, default_value = "127.0.0.1")]
+    /// Address the panel and API listen on [default: the saved setting,
+    /// 127.0.0.1]; saved as the new setting.
+    #[arg(long)]
     host: Option<String>,
-    #[arg(long, default_value_t = 12341)]
-    port: u16,
+    /// Port of the panel and API [default: the saved setting, 12340]; saved.
+    #[arg(long)]
+    port: Option<u16>,
     /// Where settings are stored [default: <exe dir>].
     #[arg(long)]
     data_dir: Option<PathBuf>,
@@ -138,8 +155,8 @@ struct GuiArgs {
     /// Do not open a browser.
     #[arg(long)]
     no_browser: bool,
-    /// Token required to open the panel; generated automatically when
-    /// listening on a non-loopback address.
+    /// Extra admin token, required even on this machine (other machines
+    /// always need the management token or this one).
     #[arg(long, env = "WRAPPER_GUI_TOKEN")]
     access_token: Option<String>,
 }
@@ -194,13 +211,15 @@ struct SandboxArgs {
 
 fn main() {
     let cli = Cli::parse();
-    let code = match cli.cmd.unwrap_or_else(|| Cmd::Gui(GuiArgs { port: 12341, ..Default::default() })) {
+    let code = match cli.cmd.unwrap_or_else(|| Cmd::Gui(GuiArgs::default())) {
         Cmd::Gui(args) => run_async(run_gui(args)),
         Cmd::SandboxExec(args) => sandbox_exec(args),
         Cmd::Agent(args) => run_async(run_agent(*args)),
         Cmd::Qemu(args) => run_async(run_qemu(*args)),
         Cmd::Login(args) => run_async(client::login(args)),
         Cmd::Accounts(args) => run_async(client::accounts(args)),
+        Cmd::Backup(args) => run_async(client::backup(args)),
+        Cmd::Restore(args) => run_async(client::restore(args)),
         Cmd::Update(args) => run_async(update::run(args)),
     };
     std::process::exit(code);
@@ -342,11 +361,24 @@ async fn run_agent(args: AgentArgs) -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("cannot listen on {listen}"))?;
     let agent = Agent::new(cfg, bus)?;
+    if args.public || args.max_accounts.is_some() {
+        let patch = wrapper_agent::settings::SettingsPatch {
+            public_mode: args.public.then_some(true),
+            max_accounts: args.max_accounts,
+            ..Default::default()
+        };
+        agent.update_settings(patch).map_err(anyhow::Error::msg)?;
+    }
     tracing::info!("wrapper agent {} listening on http://{listen}", env!("CARGO_PKG_VERSION"));
+    if agent.settings().public_mode {
+        let max = agent.settings().max_accounts;
+        tracing::info!("public mode is on (max accounts: {})", if max == 0 { "no limit".to_string() } else { max.to_string() });
+    }
     agent.boot().await;
 
+    let ui = (!args.no_ui).then(wrapper_host::gui::ui_router);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(wrapper_agent::server::serve(agent.clone(), listener, async {
+    let server = tokio::spawn(wrapper_agent::server::serve(agent.clone(), listener, ui, async {
         let _ = stop_rx.await;
     }));
     tokio::select! {
@@ -366,22 +398,29 @@ async fn run_gui(args: GuiArgs) -> anyhow::Result<()> {
     let _bus = init_logging("info");
     wrapper_host::platform::kill_children_on_exit();
     let exe = wrapper_host::exe_dir();
-    let host = args.host.unwrap_or_else(|| "127.0.0.1".into());
-    let listen: SocketAddr = format!("{host}:{}", args.port)
-        .parse()
-        .with_context(|| format!("invalid listen address {host}:{}", args.port))?;
-    let access_token = args.access_token.filter(|t| !t.is_empty()).or_else(|| {
-        (!listen.ip().is_loopback()).then(gui::config::random_token)
-    });
+    let data_dir = args.data_dir.unwrap_or_else(gui::default_data_dir);
+    let listen = match (args.host, args.port) {
+        (None, None) => None,
+        (host, port) => {
+            let saved = gui::config::GuiConfig::load(&gui::config::config_path(&data_dir));
+            let host = host.unwrap_or(saved.api_host);
+            let port = port.unwrap_or(saved.api_port);
+            let addr: SocketAddr = format!("{host}:{port}")
+                .parse()
+                .or_else(|_| format!("[{host}]:{port}").parse())
+                .with_context(|| format!("invalid listen address {host}:{port}"))?;
+            Some(addr)
+        }
+    };
     let opts = GuiOptions {
         listen,
         paths: Paths {
-            data_dir: args.data_dir.unwrap_or_else(gui::default_data_dir),
+            data_dir,
             assets_dir: args.assets_dir.unwrap_or_else(|| exe.join("qemu")),
             rootfs: args.rootfs.unwrap_or_else(|| exe.join("rootfs")),
         },
         open_browser: !args.no_browser,
-        access_token,
+        access_token: args.access_token.filter(|t| !t.is_empty()),
     };
     gui::run(opts, shutdown_signal()).await
 }

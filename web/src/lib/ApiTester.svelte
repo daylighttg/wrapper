@@ -21,7 +21,7 @@
     for (const p of params) if (values[p]) q.set(p, values[p]);
     const started = performance.now();
     try {
-      const res = await fetch(`/api/public${endpoint}?${q}`);
+      const res = await fetch(`${endpoint}?${q}`);
       const text = await res.text();
       try {
         const json = JSON.parse(text);

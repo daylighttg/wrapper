@@ -1,8 +1,9 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 
-// `npm run dev` proxies the API to a running `wrapper gui` (default port 12341).
-const backend = process.env.WRAPPER_GUI_URL || 'http://127.0.0.1:12341';
+// `npm run dev` proxies the API to a running `wrapper gui` (default port 12340).
+const backend = process.env.WRAPPER_GUI_URL || 'http://127.0.0.1:12340';
+const paths = ['/api', '/status', '/health', '/m3u8', '/key', '/lyrics', '/webplayback', '/license'];
 
 export default defineConfig({
   plugins: [svelte()],
@@ -13,6 +14,6 @@ export default defineConfig({
     chunkSizeWarningLimit: 600,
   },
   server: {
-    proxy: { '/api': { target: backend, changeOrigin: true } },
+    proxy: Object.fromEntries(paths.map((p) => [p, { target: backend }])),
   },
 });

@@ -36,6 +36,7 @@ pub struct EngineStatus {
     pub engine: Option<EngineKind>,
     /// Unix ms of the last state change.
     pub since: i64,
+    /// The wrapper-lite API as clients reach it (the GUI's port).
     pub api_url: Option<String>,
     pub last_error: Option<String>,
 }
@@ -76,7 +77,7 @@ pub struct Engine {
     seq: AtomicU64,
     events: broadcast::Sender<HostEvent>,
     running: tokio::sync::Mutex<Option<Running>>,
-    /// API endpoint + token of the running agent, for the proxy.
+    /// Private endpoint + token of the running agent, for the proxy.
     current: Mutex<Option<(String, String)>>,
     http: reqwest::Client,
 }
@@ -138,7 +139,8 @@ impl Engine {
         self.status.lock().unwrap().clone()
     }
 
-    /// `(api_url, token)` of the running agent.
+    /// `(agent url, token)` of the running agent (a loopback port only the
+    /// GUI talks to).
     pub fn current_api(&self) -> Option<(String, String)> {
         self.current.lock().unwrap().clone()
     }
@@ -154,6 +156,15 @@ impl Engine {
             s.clone()
         };
         self.emit(HostEvent::Status { status: snapshot });
+    }
+
+    /// The GUI moved its port: report the new API address.
+    pub fn set_public_url(&self, url: String) {
+        self.set_status(|s| {
+            if s.api_url.is_some() {
+                s.api_url = Some(url);
+            }
+        });
     }
 
     pub fn console_line(&self, text: &str) {
@@ -180,18 +191,24 @@ impl Engine {
         v
     }
 
-    pub async fn start(self: &Arc<Self>, cfg: GuiConfig, paths: Paths) -> Result<(), String> {
+    /// Starts the agent on a private loopback port; `public_url` is where
+    /// the GUI serves its API.
+    pub async fn start(self: &Arc<Self>, cfg: GuiConfig, paths: Paths, public_url: String) -> Result<(), String> {
         cfg.validate()?;
         let mut running = self.running.lock().await;
         if running.as_ref().is_some_and(|r| !r.task.is_finished()) {
             return Err("the engine is already running".into());
         }
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .map_err(|e| format!("no free port for the agent: {e}"))?;
+        let api_url = format!("http://127.0.0.1:{port}");
         let (stop_tx, stop_rx) = watch::channel(false);
-        let api_url = cfg.api_url();
         self.set_status(|s| {
             s.state = EngineState::Starting;
             s.engine = Some(cfg.engine);
-            s.api_url = Some(api_url.clone());
+            s.api_url = Some(public_url);
             s.last_error = None;
         });
         *self.current.lock().unwrap() = Some((api_url.clone(), cfg.api_token.clone()));
@@ -199,7 +216,9 @@ impl Engine {
         let engine = self.clone();
         let task = match cfg.engine {
             EngineKind::Qemu => {
-                let qcfg = qemu_config(&cfg, &paths);
+                let mut qcfg = qemu_config(&cfg, &paths);
+                qcfg.host = "127.0.0.1".into();
+                qcfg.host_port = port;
                 let status = qemu::check_assets(&qcfg);
                 if !status.ready() {
                     let msg = if status.qemu.is_none() {
@@ -225,7 +244,7 @@ impl Engine {
                     return Err(msg);
                 }
                 tokio::spawn(async move {
-                    let result = engine.run_native(&cfg, rootfs, stop_rx).await;
+                    let result = engine.run_native(&cfg, rootfs, port, stop_rx).await;
                     engine.finished(result);
                 })
             }
@@ -297,7 +316,13 @@ impl Engine {
         }
     }
 
-    async fn run_native(self: &Arc<Self>, cfg: &GuiConfig, rootfs: PathBuf, mut stop: watch::Receiver<bool>) -> Result<bool, String> {
+    async fn run_native(
+        self: &Arc<Self>,
+        cfg: &GuiConfig,
+        rootfs: PathBuf,
+        port: u16,
+        mut stop: watch::Receiver<bool>,
+    ) -> Result<bool, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let mut cmd = tokio::process::Command::new(exe);
         cmd.arg("agent")
@@ -305,7 +330,7 @@ impl Engine {
             .arg("sandbox")
             .arg("--rootfs")
             .arg(&rootfs)
-            .args(["--host", &cfg.api_host, "--port", &cfg.api_port.to_string()])
+            .args(["--host", "127.0.0.1", "--port", &port.to_string()])
             .args(["--api-token", &cfg.api_token])
             .args(cfg.agent_args())
             .env("NO_COLOR", "1")
@@ -320,7 +345,7 @@ impl Engine {
                 Ok(())
             });
         }
-        self.console_line(&format!("[gui] starting the native agent on {}", cfg.api_url()));
+        self.console_line(&format!("[gui] starting the native agent on 127.0.0.1:{port}"));
         let mut child = cmd.spawn().map_err(|e| format!("failed to start the agent: {e}"))?;
         if let Some(o) = child.stdout.take() {
             self.pump(o);

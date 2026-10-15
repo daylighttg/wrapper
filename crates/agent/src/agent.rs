@@ -18,6 +18,9 @@ use crate::events::{now_millis, Event, EventBus};
 use crate::health::HealthState;
 use crate::lite::{pump_output, LiteOptions, LiteRuntime, Signal};
 use crate::login::LoginSession;
+use crate::public::PublicState;
+use crate::settings::AgentSettings;
+use crate::stats::Stats;
 
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -163,6 +166,7 @@ impl Instance {
             degraded: self.circuit_open(),
             health: self.health_view(),
             created_at: rec.created_at,
+            public: rec.owner_key_hash.is_some(),
         }
     }
 
@@ -286,6 +290,11 @@ pub struct Agent {
     startup: Arc<Semaphore>,
     ready: AtomicBool,
     shutdown: Notify,
+    pub(crate) settings: RwLock<AgentSettings>,
+    pub stats: Stats,
+    pub(crate) public: PublicState,
+    /// Set while a backup is being restored.
+    pub(crate) restoring: AtomicBool,
 }
 
 enum RunEnd {
@@ -299,6 +308,8 @@ impl Agent {
         let apple = AppleClient::new(cfg.lite.proxy.as_deref())?;
         let upstream = reqwest::Client::builder().no_proxy().timeout(cfg.upstream_timeout).build()?;
         let startup = Arc::new(Semaphore::new(cfg.startup_parallelism.max(1)));
+        let settings = AgentSettings::load(&cfg.layout.settings_path());
+        let stats = Stats::load(cfg.layout.stats_path());
         Ok(Arc::new(Self {
             cfg,
             bus,
@@ -310,7 +321,46 @@ impl Agent {
             startup,
             ready: AtomicBool::new(false),
             shutdown: Notify::new(),
+            settings: RwLock::new(settings),
+            stats,
+            public: PublicState::default(),
+            restoring: AtomicBool::new(false),
         }))
+    }
+
+    pub fn settings(&self) -> AgentSettings {
+        self.settings.read().unwrap().clone()
+    }
+
+    /// Applies and persists a settings change.
+    pub fn update_settings(&self, patch: crate::settings::SettingsPatch) -> Result<AgentSettings, String> {
+        let mut s = self.settings.write().unwrap();
+        let mut next = s.clone();
+        next.apply(patch)?;
+        if next.public_mode && !s.public_mode && self.cfg.api_token.is_none() {
+            return Err("public mode needs a management token (--api-token); without one every visitor is an administrator".into());
+        }
+        next.save(&self.layout().settings_path()).map_err(|e| format!("cannot save settings: {e}"))?;
+        if next.public_mode != s.public_mode {
+            tracing::info!("public mode {}", if next.public_mode { "enabled" } else { "disabled" });
+        }
+        *s = next.clone();
+        Ok(next)
+    }
+
+    /// Takes over restored settings (keeping the salt when they have none).
+    pub(crate) fn replace_settings(&self, mut next: AgentSettings) {
+        if next.public_salt.is_empty() {
+            next.public_salt = self.settings().public_salt;
+        }
+        if next.public_mode && self.cfg.api_token.is_none() {
+            tracing::warn!("the backup enables public mode, but this agent has no management token; leaving it off");
+            next.public_mode = false;
+        }
+        if let Err(e) = next.save(&self.layout().settings_path()) {
+            tracing::warn!("cannot save settings: {e}");
+        }
+        *self.settings.write().unwrap() = next;
     }
 
     pub fn layout(&self) -> &Layout {
@@ -400,6 +450,15 @@ impl Agent {
         for inst in &to_start {
             self.start_instance(inst);
         }
+        // Counters are written out once a minute (and at shutdown).
+        let agent = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                agent.stats.flush();
+            }
+        });
         // Readiness = every initial instance left the startup phase.
         let agent = self.clone();
         tokio::spawn(async move {
@@ -461,6 +520,7 @@ impl Agent {
         for inst in self.instances() {
             self.stop_instance(&inst).await;
         }
+        self.stats.flush();
     }
 
     /// Queries a lite instance's `/status` and returns its first region.

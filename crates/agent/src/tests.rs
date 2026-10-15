@@ -96,8 +96,7 @@ fn add_running(agent: &Agent, user: &str, region: &str, port: u16) -> String {
         username: user.into(),
         region: region.into(),
         enabled: true,
-        device_info: None,
-        created_at: 0,
+        ..Default::default()
     };
     let (inst, _) = agent.insert_instance(rec);
     inst.set_running_for_test(port);
@@ -521,4 +520,235 @@ async fn restart_budget_is_rate_limited() {
     assert!(!inst.take_restart_budget(2, window), "third restart inside the window is refused");
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(inst.take_restart_budget(2, window), "the window slides");
+}
+
+// ------------------------------------------------ stats, public mode, backup
+
+fn json_req(method: &str, uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
+    let mut b = Request::builder().method(method).uri(uri).header("Content-Type", "application/json");
+    if let Some(t) = token {
+        b = b.header("Authorization", format!("Bearer {t}"));
+    }
+    b.body(Body::from(body.to_string())).unwrap()
+}
+
+fn authed_get(uri: &str, token: &str) -> Request<Body> {
+    Request::get(uri).header("Authorization", format!("Bearer {token}")).body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn served_requests_are_counted_per_account() {
+    let agent = test_agent("stats", None);
+    let ok = add_running(&agent, "a@x.y", "jp", fake_lite(0, Arc::new(AtomicUsize::new(0))).await);
+    call(&agent, get_req("/m3u8?adamId=1")).await;
+    call(&agent, get_req("/m3u8?adamId=2")).await;
+    // Validation failures are not counted; requests nobody serves are.
+    call(&agent, get_req("/key?adamId=1")).await;
+    agent.remove_instance(&ok);
+    call(&agent, get_req("/m3u8?adamId=3")).await;
+
+    let (_, body) = call(&agent, get_req("/api/stats")).await;
+    let data = &body["data"];
+    assert_eq!(data["accounts"][&ok]["total"]["m3u8"]["ok"], 2);
+    assert_eq!(data["accounts"][&ok]["today"]["m3u8"]["ok"], 2);
+    assert_eq!(data["summary"]["total"]["m3u8"], json!({"ok": 2, "fail": 1}));
+    assert!(data["summary"]["total"].get("key").is_none());
+    assert_eq!(data["summary"]["daily"].as_array().unwrap().len(), crate::stats::KEEP_DAYS as usize);
+}
+
+#[tokio::test]
+async fn public_mode_needs_a_token_and_hides_private_data() {
+    let open = test_agent("public-open", None);
+    let (status, body) = call(&open, json_req("PUT", "/api/settings", None, json!({"publicMode": true}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let agent = test_agent("public", Some("t0k"));
+    let (_, body) = call(&agent, get_req("/api/public/overview")).await;
+    assert_eq!(body["data"]["publicMode"], false);
+    let (status, _) = call(&agent, json_req("POST", "/api/public/login", None, json!({"username":"a@b.c","password":"p"}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(&agent, json_req("PUT", "/api/settings", None, json!({"publicMode": true}))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let patch = json!({"publicMode": true, "maxAccounts": 5, "publicNotice": "hi"});
+    let (status, body) = call(&agent, json_req("PUT", "/api/settings", Some("t0k"), patch)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["maxAccounts"], 5);
+    let id = add_running(&agent, "someone.private@example.com", "jp", fake_lite(0, Arc::new(AtomicUsize::new(0))).await);
+    call(&agent, get_req("/m3u8?adamId=1")).await;
+
+    let (_, body) = call(&agent, get_req("/api/public/overview")).await;
+    let text = body.to_string();
+    assert!(!text.contains("someone.private"), "{text}");
+    assert!(!text.contains(&id), "account ids are not public");
+    let data = &body["data"];
+    assert_eq!(data["notice"], "hi");
+    assert_eq!(data["accounts"][0]["name"], "so***@e***.com");
+    assert_eq!(data["accounts"][0]["usage"]["total"]["m3u8"]["ok"], 1);
+    assert_eq!(data["regions"], json!(["jp"]));
+    assert_eq!(data["activeAccounts"], 1);
+    assert_eq!(data["accepting"], true);
+    // Settings survive a restart of the agent.
+    assert!(crate::settings::AgentSettings::load(&agent.layout().settings_path()).public_mode);
+}
+
+#[tokio::test]
+async fn public_login_is_limited() {
+    let agent = test_agent("public-login", Some("t"));
+    agent
+        .update_settings(crate::settings::SettingsPatch { public_mode: Some(true), max_accounts: Some(1), ..Default::default() })
+        .unwrap();
+    add_running(&agent, "taken@x.y", "jp", 1);
+    let login = |user: &str| json_req("POST", "/api/public/login", None, json!({"username": user, "password": "pw"}));
+
+    let (status, body) = call(&agent, login("Taken@x.y")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["msg"].as_str().unwrap().contains("already"), "{body}");
+    let (status, body) = call(&agent, login("new@x.y")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["msg"].as_str().unwrap().contains("full"), "{body}");
+
+    // With room, the login starts (and fails here: there is no lite), and
+    // its state is only reachable through the ticket.
+    agent.update_settings(crate::settings::SettingsPatch { max_accounts: Some(0), ..Default::default() }).unwrap();
+    let (status, body) = call(&agent, login("new@x.y")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let data = &body["data"];
+    assert_eq!(data["login"]["state"], "failed");
+    assert_eq!(data["name"], "ne***@x***.y");
+    assert_eq!(data["ownerKey"].as_str().unwrap().len(), 32);
+    let ticket = data["ticket"].as_str().unwrap();
+    let (_, body) = call(&agent, get_req(&format!("/api/public/login/{ticket}"))).await;
+    assert_eq!(body["data"]["state"], "failed");
+    let (status, _) = call(&agent, get_req("/api/public/login/nope")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(agent.instance(&account_id("new@x.y")).is_none(), "a failed login adds nothing");
+
+    // Each address gets a limited number of attempts.
+    let mut last = StatusCode::OK;
+    for _ in 0..10 {
+        last = call(&agent, login("other@x.y")).await.0;
+    }
+    assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn public_logout_needs_the_owner_key() {
+    let agent = test_agent("public-logout", Some("t"));
+    agent.update_settings(crate::settings::SettingsPatch { public_mode: Some(true), ..Default::default() }).unwrap();
+    let id = add_running(&agent, "mine@x.y", "jp", 1);
+    agent.instance(&id).unwrap().update_record(|r| r.owner_key_hash = Some(crate::settings::sha256_hex("k3y")));
+    let admin_added = add_running(&agent, "admin@x.y", "jp", 1);
+    let logout = |user: &str, key: &str| json_req("POST", "/api/public/logout", None, json!({"username": user, "key": key}));
+
+    let (status, _) = call(&agent, logout("mine@x.y", "wrong")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(&agent, logout("admin@x.y", "")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "accounts without a key cannot be logged out publicly");
+    let (status, body) = call(&agent, logout("MINE@x.y", "k3y")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(agent.instance(&id).is_none());
+    assert!(agent.instance(&admin_added).is_some());
+    let (_, body) = call(&agent, get_req("/api/accounts?token=t")).await;
+    assert_eq!(body["data"][0]["public"], false);
+}
+
+#[tokio::test]
+async fn session_cookie_signs_the_panel_in() {
+    let agent = test_agent("session", Some("s3cret"));
+    let (_, body) = call(&agent, get_req("/api/whoami")).await;
+    assert_eq!(body["data"], json!({"mode": "agent", "admin": false, "tokenRequired": true, "version": env!("CARGO_PKG_VERSION")}));
+    let (status, _) = call(&agent, json_req("POST", "/api/session", None, json!({"token": "nope"}))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let res = crate::server::router(agent.clone())
+        .oneshot(json_req("POST", "/api/session", None, json!({"token": "s3cret"})))
+        .await
+        .unwrap();
+    let cookie = res.headers()["set-cookie"].to_str().unwrap().to_string();
+    assert!(cookie.starts_with("wrapper_admin=s3cret;") && cookie.contains("HttpOnly"), "{cookie}");
+    let req = Request::get("/api/accounts").header("Cookie", "a=b; wrapper_admin=s3cret").body(Body::empty()).unwrap();
+    let (status, _) = call(&agent, req).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn backup_restores_accounts_on_another_agent() {
+    let src = test_agent("backup-src", Some("a"));
+    src.update_settings(crate::settings::SettingsPatch { public_mode: Some(true), max_accounts: Some(7), ..Default::default() })
+        .unwrap();
+    let id = add_running(&src, "a@x.y", "jp", fake_lite(0, Arc::new(AtomicUsize::new(0))).await);
+    let dir = src.layout().ensure_account_dir(&id).unwrap();
+    std::fs::write(dir.join("MUSIC_TOKEN"), "music").unwrap();
+    std::fs::write(dir.join("mpl_db/db"), "db").unwrap();
+    call(&src, get_req("/m3u8?adamId=1")).await;
+    let src_salt = src.settings().public_salt;
+
+    let (status, _) = call(&src, get_req("/api/backup")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let res = crate::server::router(src.clone()).oneshot(authed_get("/api/backup", "a")).await.unwrap();
+    assert_eq!(res.headers()["content-type"], "application/gzip");
+    assert!(res.headers()["content-disposition"].to_str().unwrap().contains("wrapper-backup-"));
+    let archive = res.into_body().collect().await.unwrap().to_bytes();
+
+    let dst = test_agent("backup-dst", Some("b"));
+    let other = add_running(&dst, "other@x.y", "us", 1);
+    let restore = |q: &str| {
+        Request::post(format!("/api/restore?{q}"))
+            .header("Authorization", "Bearer b")
+            .body(Body::from(archive.clone()))
+            .unwrap()
+    };
+    let (status, body) = call(&dst, restore("mode=merge")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["added"], 1);
+    assert_eq!(body["data"]["settings"], false);
+    let restored = dst.layout().account_dir(&id);
+    assert_eq!(std::fs::read_to_string(restored.join("MUSIC_TOKEN")).unwrap(), "music");
+    assert!(restored.join("mpl_db/db").exists());
+    assert!(dst.instance(&other).is_some(), "merge keeps the other accounts");
+    assert_eq!(dst.stats.account(&id).total["m3u8"].ok, 1);
+    assert!(!dst.settings().public_mode);
+    assert!(Layout::load(dst.layout()).iter().any(|r| r.id == id), "the registry is saved");
+
+    // Replace: an exact copy, settings included.
+    let (_, body) = call(&dst, restore("mode=replace&settings=1")).await;
+    assert_eq!(body["data"]["replaced"], 1);
+    assert_eq!(body["data"]["removed"], 1);
+    assert!(dst.instance(&other).is_none());
+    let s = dst.settings();
+    assert!(s.public_mode);
+    assert_eq!(s.max_accounts, 7);
+    assert_eq!(s.public_salt, src_salt, "public handles stay the same after a move");
+    assert!(!dst.layout().state_dir.read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".restore")));
+
+    let bad = Request::post("/api/restore").header("Authorization", "Bearer b").body(Body::from("junk")).unwrap();
+    let (status, _) = call(&dst, bad).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    src.shutdown().await;
+    dst.shutdown().await;
+}
+
+#[tokio::test]
+async fn pull_migrates_from_a_running_agent() {
+    let src = test_agent("pull-src", Some("old"));
+    let id = add_running(&src, "a@x.y", "jp", 1);
+    std::fs::write(src.layout().ensure_account_dir(&id).unwrap().join("MUSIC_TOKEN"), "m").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = src.clone();
+    tokio::spawn(async move { crate::server::serve(server, listener, None, std::future::pending()).await });
+
+    let dst = test_agent("pull-dst", Some("new"));
+    let pull = |token: &str| {
+        json_req("POST", "/api/restore/pull", Some("new"), json!({"url": format!("http://127.0.0.1:{port}/"), "token": token}))
+    };
+    let (status, body) = call(&dst, pull("wrong")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["msg"].as_str().unwrap().contains("unauthorized"), "{body}");
+    let (status, body) = call(&dst, pull("old")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["accounts"], json!(["a@x.y"]));
+    assert!(dst.layout().account_dir(&id).join("MUSIC_TOKEN").exists());
+    dst.shutdown().await;
 }

@@ -38,7 +38,7 @@ Download the package for your platform from the
 | Android | `wrapper-<version>-android.apk`, or `wrapper-<version>-android-aarch64.tar.gz` for Termux |
 
 1. Extract and run `wrapper` (`wrapper.exe` on Windows). The panel opens at
-   `http://127.0.0.1:12341`.
+   `http://127.0.0.1:12340`, the same address as the API.
 2. Click **Start**. The first QEMU boot creates and formats a data disk.
 3. Open **Accounts → Add account**, enter your Apple ID and password, and the
    2FA code when asked. Add as many accounts as you like.
@@ -46,8 +46,50 @@ Download the package for your platform from the
    (default `http://127.0.0.1:12340`).
 
 To serve other machines, set **Settings → Network → Listen on** to
-`0.0.0.0`. The management endpoints (`/login`, `/logout`, `/api`) always
-require the management token shown in the panel.
+`0.0.0.0` (it applies at once). The panel and the API share that port: on
+this machine the panel opens directly, other machines sign in with the
+management token shown in the panel (or open the `?token=` URL wrapper
+prints). The management endpoints (`/login`, `/logout`, `/api`) always
+require the token.
+
+### Public mode
+
+**Public mode** lets anyone who opens your address add their own Apple Music
+account, so a group can pool accounts on one server. Turn it on under
+**Public mode** in the panel (or `wrapper agent --public`):
+
+* Visitors get a public page instead of the panel: service status, regions,
+  request statistics per endpoint (`/m3u8`, `/key`, `/lyrics`, …) and per
+  account, the account list with masked names (`jo***@g***.com`), and a
+  login form with 2FA. Apple IDs, logs, settings and the token stay hidden.
+* **Maximum active accounts** caps how many logged-in accounts the server
+  runs (each is a lite process, about 150 MB), so a small machine does not run
+  out of memory. Accounts you add yourself are not limited.
+* A visitor who logs in gets a **logout key** (remembered by their browser).
+  Logging out needs the Apple ID and that key, so nobody can remove someone
+  else's account. An Apple ID that is already serving cannot be logged in
+  again publicly until it is logged out.
+* At most two public logins run at a time, and each address may start six
+  per 30 minutes.
+
+### Backup and migration
+
+**Backup** in the panel downloads one `.tar.gz` with every account's login
+session (tokens, Apple session database, device id), the public-mode settings
+and the statistics. Restored accounts come up without logging in again.
+Restoring **merges** (adds the backup's accounts) or **replaces** everything.
+
+To move to a new server, start wrapper there and use **Backup → Directly from
+another server** with the old address and token: the new server downloads
+the backup itself. The same from the command line:
+
+```bash
+wrapper backup  --url http://old:12340 --token <token>             # -> wrapper-backup-<date>.tar.gz
+wrapper restore --url http://new:12340 --token <token> wrapper-backup-*.tar.gz
+wrapper restore --url http://new:12340 --token <token> --from http://old:12340 --from-token <old token>
+```
+
+A backup lets anyone use the accounts in it: keep it private.
 
 Upgrading from the single-account version: an existing `qemu/data.img` (or
 `rootfs/data`) keeps working; its account is migrated automatically and shows
@@ -62,6 +104,9 @@ address is `0.0.0.0`. Stop it from the notification.
 
 In Termux: `./wrapper gui --no-browser`, then open the printed URL.
 
+The APK protects the panel with a token even on the device (other apps can
+reach `127.0.0.1` too); the app opens it for you.
+
 ### Linux without QEMU
 
 On Linux x86_64 the agent can run lite directly in a user-namespace chroot
@@ -72,6 +117,9 @@ On Linux x86_64 the agent can run lite directly in a user-namespace chroot
 ./wrapper agent --host 0.0.0.0 --port 12340 --api-token <secret>   # uses ./rootfs
 ./wrapper login --token <secret>                                  # Apple ID, password, 2FA
 ```
+
+The headless agent serves the panel on its API port as well (without the
+engine and host settings); sign in with the token. `--no-ui` turns it off.
 
 ### Headless QEMU
 
@@ -91,6 +139,8 @@ docker compose exec wrapper /app/wrapper login --token <secret>
 ```
 
 The container runs the native agent; account data lives in `./rootfs/data`.
+The panel is at `http://<host>:12340`; set `WRAPPER_PUBLIC=true` in `.env`
+for public mode.
 User namespaces need `seccomp`/`apparmor` relaxed (as in `compose.yaml`) or
 `--privileged`.
 
@@ -98,11 +148,13 @@ User namespaces need `seccomp`/`apparmor` relaxed (as in `compose.yaml`) or
 
 | Command | Purpose |
 |---|---|
-| `wrapper` / `wrapper gui` | Web panel (`--host`, `--port 12341`, `--no-browser`, `--data-dir`, `--assets-dir`, `--rootfs`, `--access-token`) |
+| `wrapper` / `wrapper gui` | Web panel and API on one port (`--host`, `--port` override and save Settings → Network; `--no-browser`, `--data-dir`, `--assets-dir`, `--rootfs`, `--access-token`) |
 | `wrapper qemu` | Boot the agent in QEMU (`--host`, `--host-port`, `--memory`, `--smp`, `--accel kvm\|whpx\|hvf\|tcg`, `--qemu-bin`, `--disk-size`, `--api-token`, `--proxy`, `-- <agent args>`) |
-| `wrapper agent` | Run the agent (Linux; `--runtime auto\|direct\|sandbox\|sandbox-privileged`, `--proxy`, `--api-token`, `--device-info`, `--instance-concurrency`, …) |
+| `wrapper agent` | Run the agent (Linux; `--runtime auto\|direct\|sandbox\|sandbox-privileged`, `--proxy`, `--api-token`, `--device-info`, `--instance-concurrency`, `--public`, `--max-accounts`, `--no-ui`, …) |
 | `wrapper login` | Add or re-login an account on a running agent, with interactive 2FA |
 | `wrapper accounts` | List accounts and their state |
+| `wrapper backup` | Download a backup of every account (`--url`, `--token`, `-o`) |
+| `wrapper restore` | Restore a backup file, or migrate with `--from <url> --from-token`; `--replace`, `--settings` |
 | `wrapper update` | Upgrade to the latest release, only downloading what changed (`--check`, `-y`, `--version <tag>`, `--only bin,guest,qemu,rootfs`, `--mirror`); see [docs/UPDATING.md](docs/UPDATING.md) |
 
 `wrapper <command> --help` lists every option.
@@ -135,7 +187,8 @@ Account management (token required):
 |---|---|---|
 | `/login` | POST | `{"username","password"}` → `code 2` + `data.loginId` when a 2FA code is needed; repeat with `"code"` |
 | `/logout` | POST | `{"username"}` |
-| `/api/...` | | full management API, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#http-api) |
+| `/api/...` | | full management API (accounts, settings, statistics, backup / restore), see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#http-api) |
+| `/api/public/...` | | public mode (no token), see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#public-mode) |
 
 ## Build from source
 

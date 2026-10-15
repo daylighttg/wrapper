@@ -1,5 +1,5 @@
 <script>
-  import { app } from '../lib/state.svelte.js';
+  import { app, engineUp, refreshStats } from '../lib/state.svelte.js';
   import { t, duration } from '../lib/i18n.svelte.js';
   import { busy, engineAction } from '../lib/engine.svelte.js';
   import Icon from '../lib/Icon.svelte';
@@ -7,6 +7,8 @@
   import CopyField from '../lib/CopyField.svelte';
   import AccountBadge from '../lib/AccountBadge.svelte';
   import ApiTester from '../lib/ApiTester.svelte';
+  import UsageTiles from '../lib/UsageTiles.svelte';
+  import UsageChart from '../lib/UsageChart.svelte';
 
   let now = $state(Date.now());
   $effect(() => {
@@ -15,7 +17,15 @@
   });
 
   const state = $derived(app.status?.state || 'stopped');
-  const up = $derived(state === 'running' || state === 'starting');
+  const up = $derived(engineUp());
+  const gui = $derived(app.mode === 'gui');
+
+  $effect(() => {
+    if (!up) return;
+    refreshStats();
+    const id = setInterval(refreshStats, 15000);
+    return () => clearInterval(id);
+  });
   const cfg = $derived(app.config);
   const serving = $derived(app.accounts.filter((a) => a.state === 'running'));
   const regions = $derived([...new Set(serving.map((a) => a.region).filter(Boolean))].sort());
@@ -27,7 +37,8 @@
   const lowMemory = $derived(cfg?.engine === 'qemu' && app.accounts.length > 1 && cfg.memoryMb < recommendedMb);
 </script>
 
-<div class="grid top">
+<div class="grid top" class:single={!gui}>
+  {#if gui}
   <section class="card engine">
     <div class="card-title">
       <h2>{t('dash.engine')}</h2>
@@ -72,12 +83,18 @@
       </div>
     </div>
   </section>
+  {/if}
 
   <section class="card">
     <div class="card-title"><h2>{t('dash.endpoint')}</h2></div>
-    {#if cfg}
+    {#if !gui}
       <div class="stack">
-        <CopyField value={app.status?.apiUrl || `http://${cfg.apiHost === '0.0.0.0' ? '127.0.0.1' : cfg.apiHost}:${cfg.apiPort}`} />
+        <CopyField value={location.origin} />
+        <div class="hint">{t('dash.endpointHint')}</div>
+      </div>
+    {:else if cfg}
+      <div class="stack">
+        <CopyField value={app.status?.apiUrl || app.info?.apiUrl || `http://${cfg.apiHost === '0.0.0.0' ? '127.0.0.1' : cfg.apiHost}:${cfg.apiPort}`} />
         {#if lanUrl}
           <div class="small muted">{t('dash.lan')}</div>
           <CopyField value={lanUrl} />
@@ -108,6 +125,22 @@
     </div>
   </section>
 </div>
+
+{#if up}
+  <section class="card usage">
+    <div class="card-title">
+      <h2>{t('usage.title')}</h2>
+      {#if app.stats}<span class="small muted">{t('usage.since', { date: new Date(app.stats.summary.since).toLocaleDateString() })}</span>{/if}
+    </div>
+    {#if app.stats}
+      <UsageTiles summary={app.stats.summary} />
+      <div class="gap"></div>
+      <UsageChart daily={app.stats.summary.daily} />
+    {:else}
+      <div class="muted small">…</div>
+    {/if}
+  </section>
+{/if}
 
 <section class="card">
   <div class="card-title">
@@ -145,9 +178,21 @@
     margin-bottom: 16px;
   }
 
+  .top.single {
+    grid-template-columns: 1fr;
+  }
+
   .stats {
     grid-template-columns: 1fr 2fr;
     margin-bottom: 16px;
+  }
+
+  .usage {
+    margin-bottom: 16px;
+  }
+
+  .gap {
+    height: 18px;
   }
 
   .stat .big {

@@ -1,57 +1,94 @@
 <script>
   import { onMount } from 'svelte';
   import { app, init } from './lib/state.svelte.js';
+  import { session, pub } from './lib/api.js';
   import { t, locale, setLang } from './lib/i18n.svelte.js';
+  import { theme, initTheme, toggleTheme } from './lib/theme.svelte.js';
   import Icon from './lib/Icon.svelte';
   import EngineBadge from './lib/EngineBadge.svelte';
+  import AdminLogin from './lib/AdminLogin.svelte';
   import Dashboard from './pages/Dashboard.svelte';
   import Accounts from './pages/Accounts.svelte';
+  import Sharing from './pages/Sharing.svelte';
+  import Backup from './pages/Backup.svelte';
   import Logs from './pages/Logs.svelte';
   import Settings from './pages/Settings.svelte';
   import Setup from './pages/Setup.svelte';
+  import Public from './pages/Public.svelte';
 
-  const pages = [
+  const allPages = [
     { id: 'dashboard', icon: 'dashboard', component: Dashboard },
     { id: 'accounts', icon: 'accounts', component: Accounts },
+    { id: 'sharing', icon: 'globe', component: Sharing },
+    { id: 'backup', icon: 'download', component: Backup },
     { id: 'logs', icon: 'logs', component: Logs },
-    { id: 'settings', icon: 'settings', component: Settings },
-    { id: 'setup', icon: 'package', component: Setup },
+    { id: 'settings', icon: 'settings', component: Settings, gui: true },
+    { id: 'setup', icon: 'package', component: Setup, gui: true },
   ];
+  // A headless agent has no engine or host settings.
+  const pages = $derived(allPages.filter((p) => !p.gui || app.mode === 'gui'));
 
-  const fromHash = () => {
-    const id = location.hash.replace(/^#\/?/, '').split('?')[0];
-    return pages.some((p) => p.id === id) ? id : 'dashboard';
-  };
-  let route = $state(fromHash());
+  const hashId = () => location.hash.replace(/^#\/?/, '').split('?')[0];
+  let hash = $state(hashId());
+  const route = $derived(pages.some((p) => p.id === hash) ? hash : 'dashboard');
   const current = $derived(pages.find((p) => p.id === route));
 
-  let theme = $state('light');
-  function applyTheme(next) {
-    theme = next;
-    document.documentElement.dataset.theme = next;
+  // 'loading' | 'admin' | 'public' | 'signin'
+  let view = $state('loading');
+  let offline = $state(false);
+  let isAdmin = $state(false);
+
+  async function decide() {
+    let who = null;
     try {
-      localStorage.setItem('wrapper.theme', next);
+      who = await session.whoami();
     } catch {
-      /* ignore */
+      offline = true;
+      view = 'signin';
+      return;
+    }
+    isAdmin = who.admin;
+    if (who.admin) {
+      init(who);
+      view = 'admin';
+      return;
+    }
+    try {
+      const ov = await pub.overview();
+      view = ov.publicMode ? 'public' : 'signin';
+    } catch {
+      // The engine is stopped: only an administrator can start it.
+      offline = true;
+      view = 'signin';
+    }
+  }
+
+  async function signOut() {
+    try {
+      await session.signOut();
+    } finally {
+      location.hash = '';
+      location.reload();
     }
   }
 
   onMount(() => {
-    let saved = null;
-    try {
-      saved = localStorage.getItem('wrapper.theme');
-    } catch {
-      /* ignore */
-    }
-    applyTheme(saved || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+    initTheme();
     setLang(locale.lang);
-    const onHash = () => (route = fromHash());
+    const onHash = () => (hash = hashId());
     addEventListener('hashchange', onHash);
-    init();
+    decide();
     return () => removeEventListener('hashchange', onHash);
   });
 </script>
 
+{#if view === 'loading'}
+  <div class="loading"><span class="spinner"></span></div>
+{:else if view === 'signin'}
+  <AdminLogin {offline} onback={offline ? null : () => (view = 'public')} />
+{:else if view === 'public' || hash === 'public'}
+  <Public admin={isAdmin} onadmin={() => (view = 'signin')} />
+{:else}
 <div class="shell">
   <aside>
     <div class="brand">
@@ -78,15 +115,18 @@
       {/each}
     </nav>
     <div class="aside-foot">
-      <EngineBadge />
+      {#if app.mode === 'gui'}<EngineBadge />{/if}
       <div class="row">
-        <button class="ghost icon" title="Theme" onclick={() => applyTheme(theme === 'dark' ? 'light' : 'dark')}>
-          <Icon name={theme === 'dark' ? 'sun' : 'moon'} />
+        <button class="ghost icon" title="Theme" onclick={toggleTheme}>
+          <Icon name={theme.name === 'dark' ? 'sun' : 'moon'} />
         </button>
         <button class="ghost small" onclick={() => setLang(locale.lang === 'zh' ? 'en' : 'zh')}>
           <Icon name="globe" size={16} />
           {locale.lang === 'zh' ? 'English' : '中文'}
         </button>
+        {#if app.signedIn}
+          <button class="ghost icon" title={t('signin.signOut')} onclick={signOut}><Icon name="logout" /></button>
+        {/if}
       </div>
     </div>
   </aside>
@@ -103,6 +143,7 @@
     {/key}
   </main>
 </div>
+{/if}
 
 <div class="toasts">
   {#each app.toasts as toast (toast.id)}
@@ -111,6 +152,12 @@
 </div>
 
 <style>
+  .loading {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+  }
+
   .shell {
     display: grid;
     grid-template-columns: 228px 1fr;

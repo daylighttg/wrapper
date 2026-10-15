@@ -125,6 +125,8 @@ pub struct AccountView {
     /// Result of the active `/key` probe (see `/health`).
     pub health: crate::health::HealthView,
     pub created_at: i64,
+    /// Added through the public page (its owner holds a logout key).
+    pub public: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

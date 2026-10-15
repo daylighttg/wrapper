@@ -37,6 +37,8 @@ impl std::fmt::Display for RouteError {
 pub struct Forwarded {
     pub body: Bytes,
     pub code: i64,
+    /// Account that answered.
+    pub account: String,
 }
 
 /// Decrements the in-flight counter on drop.
@@ -178,7 +180,7 @@ impl Agent {
             // Real traffic proves the key path works: no probe needed.
             inst.note_key_ok();
         }
-        Ok(Forwarded { body, code })
+        Ok(Forwarded { body, code, account: inst.id.clone() })
     }
 
     /// Forwards to the given candidates in order with the retry policy.

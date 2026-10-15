@@ -41,6 +41,9 @@ pub struct LoginSession {
     started_at: i64,
     state: watch::Sender<(LoginState, Option<String>)>,
     cancel: Mutex<Option<oneshot::Sender<()>>>,
+    /// Set for logins from the public page: stored on the account when the
+    /// login succeeds.
+    owner_key_hash: Option<String>,
 }
 
 impl LoginSession {
@@ -55,7 +58,11 @@ impl LoginSession {
         }
     }
 
-    fn is_active(&self) -> bool {
+    pub(crate) fn state(&self) -> LoginState {
+        self.state.borrow().0
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
         matches!(self.state.borrow().0, LoginState::Running | LoginState::Need2fa)
     }
 }
@@ -74,7 +81,28 @@ impl Agent {
         self.logins.lock().unwrap().get(id).map(|s| s.view())
     }
 
+    pub(crate) fn session(&self, id: &str) -> Option<Arc<LoginSession>> {
+        self.logins.lock().unwrap().get(id).cloned()
+    }
+
+    pub(crate) fn active_sessions(&self) -> Vec<Arc<LoginSession>> {
+        self.logins.lock().unwrap().values().filter(|s| s.is_active()).cloned().collect()
+    }
+
     pub async fn begin_login(self: &Arc<Self>, req: LoginRequest) -> Result<LoginView, LoginError> {
+        let session = self.start_login(req, None, true).await?;
+        Ok(wait_settled(&session).await)
+    }
+
+    /// Starts `lite --login` and returns its session without waiting.
+    /// `reuse_pending`: a login of the same account that waits for its code
+    /// is returned instead of failing with [`LoginError::Busy`].
+    pub(crate) async fn start_login(
+        self: &Arc<Self>,
+        req: LoginRequest,
+        owner_key_hash: Option<String>,
+        reuse_pending: bool,
+    ) -> Result<Arc<LoginSession>, LoginError> {
         let username = normalize_username(&req.username);
         if username.is_empty() || req.password.is_empty() {
             return Err(LoginError::Invalid("username and password are required".into()));
@@ -89,8 +117,8 @@ impl Agent {
             if let Some(s) = logins.get(&id) {
                 if s.is_active() {
                     // Repeating the first step while a code is awaited is harmless.
-                    if s.state.borrow().0 == LoginState::Need2fa {
-                        return Ok(s.view());
+                    if reuse_pending && s.state.borrow().0 == LoginState::Need2fa {
+                        return Ok(s.clone());
                     }
                     return Err(LoginError::Busy);
                 }
@@ -102,6 +130,7 @@ impl Agent {
                 started_at: now_millis(),
                 state,
                 cancel: Mutex::new(None),
+                owner_key_hash,
             });
             logins.insert(id.clone(), s.clone());
             s
@@ -133,7 +162,7 @@ impl Agent {
             Err(e) => {
                 let msg = format!("failed to start lite: {e}");
                 self.finish_failed(&session, existing.is_none(), msg.clone()).await;
-                return Ok(session.view());
+                return Ok(session);
             }
         };
         tracing::info!(source = %format!("login:{id}"), "login started for {username}");
@@ -156,7 +185,7 @@ impl Agent {
             agent.drive_login(s, child, sig_rx, cancel_rx, existing.is_none(), device_info).await;
         });
 
-        Ok(wait_settled(&session).await)
+        Ok(session)
     }
 
     async fn drive_login(
@@ -220,6 +249,7 @@ impl Agent {
                 enabled: true,
                 device_info: device_info.clone(),
                 created_at: now_millis(),
+                owner_key_hash: session.owner_key_hash.clone(),
             };
             let (inst, _) = self.insert_instance(record);
             inst.update_record(|r| {
@@ -227,6 +257,11 @@ impl Agent {
                 r.enabled = true;
                 if device_info.is_some() {
                     r.device_info = device_info.clone();
+                }
+                // A public re-login hands out a new key; an admin login keeps
+                // the owner's.
+                if session.owner_key_hash.is_some() {
+                    r.owner_key_hash = session.owner_key_hash.clone();
                 }
             });
             self.save_registry();
@@ -295,14 +330,26 @@ impl Agent {
         if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
             return Err(LoginError::Invalid("the verification code must be 6 digits".into()));
         }
-        let session = self.logins.lock().unwrap().get(id).cloned().ok_or(LoginError::NoSession)?;
-        if !session.is_active() {
+        let session = self.session(id).ok_or(LoginError::NoSession)?;
+        self.submit_code_to(&session, code).await
+    }
+
+    /// Submits a code to one particular session (it must still be the
+    /// current login of its account).
+    pub(crate) async fn submit_code_to(&self, session: &Arc<LoginSession>, code: &str) -> Result<LoginView, LoginError> {
+        let code = code.trim();
+        if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(LoginError::Invalid("the verification code must be 6 digits".into()));
+        }
+        let id = &session.id;
+        let current = self.session(id).is_some_and(|s| Arc::ptr_eq(&s, session));
+        if !current || !session.is_active() {
             return Err(LoginError::NoSession);
         }
         write_private(&self.layout().code_file(id), code)?;
-        self.set_login(&session, LoginState::Running, Some("verifying the code".into()));
+        self.set_login(session, LoginState::Running, Some("verifying the code".into()));
         tracing::info!(source = %format!("login:{id}"), "verification code submitted");
-        Ok(wait_settled(&session).await)
+        Ok(wait_settled(session).await)
     }
 
     pub fn cancel_login(&self, id: &str) -> bool {
@@ -322,6 +369,7 @@ impl Agent {
         self.stop_instance(&inst).await;
         self.remove_instance(id);
         self.save_registry();
+        self.stats.remove_account(id);
         if let Err(e) = std::fs::remove_dir_all(self.layout().account_dir(id)) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!("failed to delete data of {id}: {e}");
@@ -356,7 +404,7 @@ impl Agent {
     }
 }
 
-async fn wait_settled(session: &LoginSession) -> LoginView {
+pub(crate) async fn wait_settled(session: &LoginSession) -> LoginView {
     let mut rx = session.state.subscribe();
     let _ = tokio::time::timeout(SETTLE_WAIT, async {
         loop {

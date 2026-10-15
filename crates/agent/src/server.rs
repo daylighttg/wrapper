@@ -4,13 +4,19 @@
 //!   `/webplayback`, `/license`) routed across accounts, and an aggregated
 //!   `/status` in wrapper-manager's shape;
 //! * wrapper-manager compatible `POST /login` / `POST /logout`;
-//! * the management API under `/api` used by the GUI.
+//! * the management API under `/api` used by the GUI, including settings,
+//!   request statistics and backup / restore;
+//! * public mode under `/api/public` (see [`crate::public`]);
+//! * optionally the web panel itself (headless agents, see [`app`]).
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::rejection::JsonRejection;
+use axum::body::Body;
 use axum::extract::{Path, Query, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -27,13 +33,26 @@ use crate::accounts::{account_id, is_valid_id};
 use crate::agent::Agent;
 use crate::api::{
     CodeRequest, Envelope, InstanceState, LiteBody, LoginRequest, LoginState, LoginView, LogoutRequest, CODE_NEED_2FA,
+    CODE_OK,
 };
+use crate::backup::{stream_reader, write_archive, ChannelWriter, RestoreMode, RestoreOptions};
+use crate::events::now_millis;
 use crate::health::PREFETCH_KEY_URI;
 use crate::login::LoginError;
+use crate::settings::SettingsPatch;
 
 type AppState = Arc<Agent>;
 
+/// Cookie set by `POST /api/session` (the panel's sign-in).
+pub const ADMIN_COOKIE: &str = "wrapper_admin";
+
+/// The agent's HTTP API.
 pub fn router(agent: Arc<Agent>) -> Router {
+    app(agent, None)
+}
+
+/// The agent's HTTP API; `ui` (the web panel) answers every other path.
+pub fn app(agent: Arc<Agent>, ui: Option<Router>) -> Router {
     let public = Router::new()
         .route("/status", get(status))
         .route("/health", get(health))
@@ -57,26 +76,37 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/api/logins/{id}/code", post(api_code))
         .route("/api/system/shutdown", post(system_shutdown))
         .route("/api/logs", get(logs))
-        .route("/api/events", get(events));
+        .route("/api/events", get(events))
+        .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/stats", get(stats))
+        .route("/api/backup", get(backup))
+        .route("/api/restore", post(restore))
+        .route("/api/restore/pull", post(restore_pull));
     if agent.cfg.legacy_management {
         mgmt = mgmt.route("/login", post(legacy_login)).route("/logout", post(legacy_logout));
     }
     let mgmt = mgmt.layer(middleware::from_fn_with_state(agent.clone(), require_token));
+    let session = Router::new()
+        .route("/api/whoami", get(whoami))
+        .route("/api/session", post(session_login).delete(session_logout));
 
-    public
-        .merge(mgmt)
-        .fallback(|| async { Envelope::fail("not found").status(StatusCode::NOT_FOUND) })
-        .layer(middleware::from_fn(cors))
-        .with_state(agent)
+    let all = public.merge(session).merge(crate::public::routes()).merge(mgmt);
+    let all = match ui {
+        Some(ui) => all.fallback_service(ui),
+        None => all.fallback(|| async { Envelope::fail("not found").status(StatusCode::NOT_FOUND) }),
+    };
+    all.layer(middleware::from_fn(cors)).with_state(agent)
 }
 
-/// Serves the router until `shutdown` resolves.
+/// Serves the API (and `ui`, when given) until `shutdown` resolves.
 pub async fn serve(
     agent: Arc<Agent>,
     listener: tokio::net::TcpListener,
+    ui: Option<Router>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(listener, router(agent)).with_graceful_shutdown(shutdown).await
+    let app = app(agent, ui).into_make_service_with_connect_info::<SocketAddr>();
+    axum::serve(listener, app).with_graceful_shutdown(shutdown).await
 }
 
 // ---------------------------------------------------------------- middleware
@@ -112,7 +142,17 @@ fn authorized(agent: &Agent, headers: &HeaderMap, query: Option<&str>) -> bool {
         .and_then(|v| v.strip_prefix("Bearer "));
     // EventSource cannot set headers, so SSE passes ?token=.
     let query = query.and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")));
-    [bearer, query].into_iter().flatten().any(|t| constant_time_eq(t.as_bytes(), expected.as_bytes()))
+    let matches = |t: &str| constant_time_eq(t.as_bytes(), expected.as_bytes());
+    bearer.is_some_and(matches) || query.is_some_and(matches) || admin_cookie(headers).is_some_and(|c| matches(&c))
+}
+
+fn admin_cookie(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|kv| kv.trim().strip_prefix(ADMIN_COOKIE)?.strip_prefix('=').map(str::to_string))
 }
 
 async fn require_token(State(agent): State<AppState>, req: Request, next: Next) -> Response {
@@ -134,9 +174,16 @@ fn is_cacheable(path: &str) -> bool {
 
 async fn route(agent: &Agent, path: &str, adam_id: &str, method: Method, raw: Option<String>, body: Bytes) -> Response {
     let candidates = agent.candidates(adam_id).await;
+    let endpoint = path.trim_start_matches('/');
     match agent.forward_with_retry(candidates, method, path, raw.as_deref(), body).await {
-        Ok(f) => LiteBody { body: f.body, code: f.code, cacheable: is_cacheable(path) }.into_response(),
-        Err(e) => Envelope::fail(e.to_string()).into_response(),
+        Ok(f) => {
+            agent.stats.record(Some(&f.account), endpoint, f.code == CODE_OK);
+            LiteBody { body: f.body, code: f.code, cacheable: is_cacheable(path) }.into_response()
+        }
+        Err(e) => {
+            agent.stats.record(None, endpoint, false);
+            Envelope::fail(e.to_string()).into_response()
+        }
     }
 }
 
@@ -179,7 +226,8 @@ async fn lyrics(State(a): State<AppState>, RawQuery(raw): RawQuery, Query(q): Qu
     let script = param(&q, "script").unwrap_or("");
     if let Some(inst) = a.lyrics_candidate(adam, language, script).await {
         if let Ok(f) = a.forward(&inst, Method::GET, "/lyrics", raw.as_deref(), Bytes::new()).await {
-            if f.code == crate::api::CODE_OK {
+            if f.code == CODE_OK {
+                a.stats.record(Some(&f.account), "lyrics", true);
                 return LiteBody { body: f.body, code: f.code, cacheable: true }.into_response();
             }
         }
@@ -402,6 +450,169 @@ async fn events(State(a): State<AppState>) -> impl IntoResponse {
         Some(Ok::<_, Infallible>(SseEvent::default().json_data(ev).ok()?))
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ------------------------------------------------- session, settings, stats
+
+/// `GET /api/whoami`: what the panel should show this visitor.
+async fn whoami(State(a): State<AppState>, headers: HeaderMap, RawQuery(raw): RawQuery) -> Envelope {
+    Envelope::ok(serde_json::json!({
+        "mode": "agent",
+        "admin": authorized(&a, &headers, raw.as_deref()),
+        "tokenRequired": a.cfg.api_token.is_some(),
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+#[derive(Deserialize)]
+struct SessionRequest {
+    token: String,
+}
+
+fn cookie_header(value: &str, max_age: u64) -> Option<HeaderValue> {
+    HeaderValue::from_str(&format!("{ADMIN_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}")).ok()
+}
+
+/// `POST /api/session {token}`: signs the browser in (HttpOnly cookie).
+async fn session_login(State(a): State<AppState>, body: Result<Json<SessionRequest>, JsonRejection>) -> Response {
+    let Ok(Json(req)) = body else {
+        return bad_request("expected {\"token\"}").into_response();
+    };
+    let Some(expected) = a.cfg.api_token.as_deref() else {
+        return Envelope::ok(serde_json::Value::Null).into_response();
+    };
+    let token = req.token.trim();
+    if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {
+        // Slow down guessing.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        return Envelope::fail("wrong token").status(StatusCode::UNAUTHORIZED).into_response();
+    }
+    let mut res = Envelope::ok(serde_json::Value::Null).into_response();
+    match cookie_header(token, 30 * 86_400) {
+        Some(v) => {
+            res.headers_mut().insert(header::SET_COOKIE, v);
+            res
+        }
+        None => bad_request("this token cannot be stored in a cookie; use the Authorization header").into_response(),
+    }
+}
+
+async fn session_logout() -> Response {
+    let mut res = Envelope::ok(serde_json::Value::Null).into_response();
+    if let Some(v) = cookie_header("", 0) {
+        res.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    res
+}
+
+fn settings_view(a: &Agent) -> serde_json::Value {
+    let s = a.settings();
+    serde_json::json!({
+        "publicMode": s.public_mode,
+        "maxAccounts": s.max_accounts,
+        "publicNotice": s.public_notice,
+        "activeAccounts": a.active_accounts(),
+        "pendingLoginLimit": crate::public::MAX_PENDING_LOGINS,
+        "tokenConfigured": a.cfg.api_token.is_some(),
+    })
+}
+
+async fn get_settings(State(a): State<AppState>) -> Envelope {
+    Envelope::ok(settings_view(&a))
+}
+
+async fn put_settings(State(a): State<AppState>, body: Result<Json<SettingsPatch>, JsonRejection>) -> Envelope {
+    let Json(patch) = match body {
+        Ok(b) => b,
+        Err(e) => return bad_request(e.body_text()),
+    };
+    match a.update_settings(patch) {
+        Ok(_) => Envelope::ok(settings_view(&a)),
+        Err(e) => bad_request(e),
+    }
+}
+
+/// `GET /api/stats`: totals, the daily series and per-account counters.
+async fn stats(State(a): State<AppState>) -> Envelope {
+    Envelope::ok(serde_json::json!({ "summary": a.stats.summary(), "accounts": a.stats.accounts() }))
+}
+
+// ---------------------------------------------------------- backup / restore
+
+/// `GET /api/backup`: streams a `.tar.gz` of every account (see [`crate::backup`]).
+async fn backup(State(a): State<AppState>) -> Response {
+    let snap = a.snapshot();
+    let layout = a.layout().clone();
+    let count = snap.records.len();
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<Bytes>>(8);
+    tokio::task::spawn_blocking(move || {
+        let result = write_archive(&layout, &snap, ChannelWriter::new(tx.clone())).and_then(|mut w| {
+            use std::io::Write;
+            w.flush()
+        });
+        match result {
+            Ok(()) => tracing::info!("backup of {count} account(s) downloaded"),
+            Err(e) => {
+                tracing::warn!("backup failed: {e}");
+                let _ = tx.blocking_send(Err(e));
+            }
+        }
+    });
+    let name = format!("wrapper-backup-{}.tar.gz", crate::backup::timestamp(now_millis()));
+    let mut res = Response::new(Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)));
+    let h = res.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/gzip"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    res
+}
+
+#[derive(Deserialize, Default)]
+struct RestoreQuery {
+    #[serde(default)]
+    mode: RestoreMode,
+    #[serde(default)]
+    settings: Option<String>,
+}
+
+fn flag(v: Option<&str>) -> bool {
+    matches!(v, Some("1" | "true" | "yes"))
+}
+
+/// `POST /api/restore?mode=merge|replace&settings=1`, body: the archive.
+async fn restore(State(a): State<AppState>, Query(q): Query<RestoreQuery>, body: Body) -> Envelope {
+    let opts = RestoreOptions { mode: q.mode, settings: flag(q.settings.as_deref()) };
+    match a.restore_from(stream_reader(body.into_data_stream()), opts).await {
+        Ok(r) => Envelope::ok(r),
+        Err(e) => bad_request(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct PullRequest {
+    url: String,
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    mode: RestoreMode,
+    #[serde(default)]
+    settings: bool,
+}
+
+/// `POST /api/restore/pull {url, token, mode, settings}`: migrates from
+/// another wrapper by downloading its backup directly.
+async fn restore_pull(State(a): State<AppState>, body: Result<Json<PullRequest>, JsonRejection>) -> Envelope {
+    let Json(req) = match body {
+        Ok(b) => b,
+        Err(e) => return bad_request(e.body_text()),
+    };
+    let opts = RestoreOptions { mode: req.mode, settings: req.settings };
+    match a.pull_backup(&req.url, &req.token, opts).await {
+        Ok(r) => Envelope::ok(r),
+        Err(e) => bad_request(e),
+    }
 }
 
 // -------------------------------------------- wrapper-manager compatibility

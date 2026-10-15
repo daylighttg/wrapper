@@ -1,6 +1,7 @@
 <script>
   import { agent } from '../lib/api.js';
-  import { app, toast, engineUp } from '../lib/state.svelte.js';
+  import { app, toast, engineUp, refreshStats } from '../lib/state.svelte.js';
+  import { total, fmt } from '../lib/usage.js';
   import { t, duration } from '../lib/i18n.svelte.js';
   import Icon from '../lib/Icon.svelte';
   import AccountBadge from '../lib/AccountBadge.svelte';
@@ -15,6 +16,13 @@
   });
 
   const up = $derived(engineUp());
+  $effect(() => {
+    if (!up) return;
+    refreshStats();
+    const id = setInterval(refreshStats, 15000);
+    return () => clearInterval(id);
+  });
+  const usage = (id) => app.stats?.accounts?.[id];
   const ago = (ts) => (now - ts < 5000 ? t('common.justNow') : t('common.ago', { time: duration(now - ts) }));
   const anyRunning = $derived(app.accounts.some((a) => a.state === 'running'));
 
@@ -80,6 +88,7 @@
             <span class="user">{a.username}</span>
             <span class="badge plain info">{(a.region || '—').toUpperCase()}</span>
             <AccountBadge account={a} />
+            {#if a.public}<span class="badge plain" title={t('acc.publicHint')}>{t('acc.public')}</span>{/if}
           </div>
           <div class="row meta small muted">
             {#if a.runningSince}<span>{t('acc.uptime', { time: duration(now - a.runningSince) })}</span>{/if}
@@ -90,6 +99,12 @@
               <span title={a.health.detail || ''}>{t('acc.health.probed', { time: ago(a.health.checkedAt), ms: a.health.tookMs ?? '?' })}</span>
             {/if}
             {#if a.health?.healthRestarts}<span>{t('acc.health.restarts', { n: a.health.healthRestarts })}</span>{/if}
+            {#if usage(a.id)}
+              {@const u = usage(a.id)}
+              <span title={Object.entries(u.total).map(([k, c]) => `/${k}: ${c.ok} ok, ${c.fail} failed`).join('\n')}>
+                {t('acc.usage', { today: fmt(total(u.today)), total: fmt(total(u.total)) })}
+              </span>
+            {/if}
             <span class="mono id">{a.id.slice(0, 8)}</span>
           </div>
           {#if a.lastError && a.state !== 'running'}

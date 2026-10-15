@@ -49,7 +49,9 @@
   <div class="row bar">
     <div class="tabs">
       <button class:active={tab === 'agent'} onclick={() => (tab = 'agent')}>{t('logs.agent')}</button>
-      <button class:active={tab === 'console'} onclick={() => (tab = 'console')}>{t('logs.console')}</button>
+      {#if app.mode === 'gui'}
+        <button class:active={tab === 'console'} onclick={() => (tab = 'console')}>{t('logs.console')}</button>
+      {/if}
     </div>
     {#if tab === 'agent'}
       <select bind:value={source} style="width: 200px">

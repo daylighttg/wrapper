@@ -9,14 +9,18 @@ pub mod accounts;
 pub mod agent;
 pub mod api;
 pub mod apple;
+pub mod backup;
 pub mod events;
 pub mod health;
 pub mod lite;
 pub mod login;
+pub mod public;
 pub mod router;
 #[cfg(target_os = "linux")]
 pub mod sandbox;
 pub mod server;
+pub mod settings;
+pub mod stats;
 #[cfg(test)]
 mod tests;
 

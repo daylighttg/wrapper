@@ -1,9 +1,15 @@
-// Global reactive state, fed by the two SSE streams.
+// Global reactive state of the admin panel, fed by the SSE streams.
+// `mode` is 'gui' (wrapper gui: engine controls) or 'agent' (a headless
+// agent serving the panel itself: no engine, no host settings).
 import { host, agent, subscribe } from './api.js';
 
 const MAX_LINES = 4000;
 
 export const app = $state({
+  mode: 'gui',
+  /** Signed in with the token (not just trusted as this machine). */
+  signedIn: false,
+  stats: null,
   info: null,
   config: null,
   status: null,
@@ -38,7 +44,16 @@ function upsertAccount(acc) {
   else app.accounts.push(acc);
 }
 
-export const engineUp = () => ['running', 'starting'].includes(app.status?.state);
+export const engineUp = () => app.mode === 'agent' || ['running', 'starting'].includes(app.status?.state);
+
+export async function refreshStats() {
+  if (!engineUp()) return;
+  try {
+    app.stats = await agent.stats();
+  } catch {
+    /* agent not reachable yet */
+  }
+}
 
 export async function refreshInfo() {
   try {
@@ -73,7 +88,7 @@ async function connectAgent() {
   }
   await refreshAgent();
   closeAgent = subscribe(
-    '/api/agent/events',
+    '/api/events',
     (ev) => {
       switch (ev.type) {
         case 'log':
@@ -117,7 +132,15 @@ function onStatus(status) {
   else if (prev && prev !== status.state) disconnectAgent();
 }
 
-export async function init() {
+export async function init(who) {
+  app.mode = who?.mode || 'gui';
+  app.signedIn = !!who?.signedIn;
+  if (app.mode === 'agent') {
+    app.hostConnected = true;
+    app.info = { version: who.version };
+    connectAgent();
+    return;
+  }
   try {
     const [info, config, status, consoleLines] = await Promise.all([
       host.info(),

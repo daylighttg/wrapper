@@ -7,6 +7,8 @@ services:
       - "12340:12340"
     environment:
       WRAPPER_API_TOKEN: ${WRAPPER_API_TOKEN:-}
+      # Public mode (anyone may add their own account); needs the token.
+      WRAPPER_PUBLIC: ${WRAPPER_PUBLIC:-false}
     # lite is started in a user namespace + chroot.
     security_opt:
       - seccomp:unconfined
