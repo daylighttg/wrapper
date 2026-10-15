@@ -50,6 +50,11 @@ fn check(ret: libc::c_int, what: &str) -> io::Result<()> {
     }
 }
 
+/// Adds the failing path to an I/O error ("Permission denied" alone is useless).
+fn at<T>(r: io::Result<T>, what: &str, path: &Path) -> io::Result<T> {
+    r.map_err(|e| io::Error::new(e.kind(), format!("{what} {}: {e}", path.display())))
+}
+
 fn write_file(path: &str, content: &str) -> io::Result<()> {
     std::fs::write(path, content).map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))
 }
@@ -66,10 +71,39 @@ fn has_cap_sys_admin() -> bool {
         .is_some_and(|caps| caps & (1 << CAP_SYS_ADMIN) != 0)
 }
 
+/// Whether we can use the privileged sandbox (real root).
+pub fn can_run_privileged() -> bool {
+    has_cap_sys_admin()
+}
+
+/// Why the rootless sandbox cannot write to `rootfs`, if it cannot.
+///
+/// Only our own uid is mapped into the user namespace, so the sandbox setup
+/// (which creates `dev/` and `proc/`) and lite (which writes `data/`) can only
+/// write where that uid may. Even root loses its override for files owned by
+/// unmapped uids, e.g. a tarball unpacked as root that kept the build uid.
+pub fn rootless_problem(rootfs: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    for dir in [rootfs.to_path_buf(), rootfs.join("data")] {
+        let Ok(meta) = std::fs::metadata(&dir) else { continue };
+        if meta.uid() != uid && meta.mode() & 0o002 == 0 {
+            return Some(format!(
+                "{} is owned by uid {}, but the rootless sandbox runs as uid {uid}; \
+                 fix with `chown -R {uid}:{gid} {}`",
+                dir.display(),
+                meta.uid(),
+                rootfs.display()
+            ));
+        }
+    }
+    None
+}
+
 fn bind_dev(rootfs: &Path, name: &str) -> io::Result<()> {
     let target = rootfs.join("dev").join(name);
     if !target.exists() {
-        std::fs::File::create(&target)?;
+        at(std::fs::File::create(&target), "create", &target)?;
     }
     let src = cstr(&Path::new("/dev").join(name))?;
     let dst = cstr(&target)?;
@@ -86,12 +120,12 @@ fn enter_and_exec(spec: &SandboxSpec) -> io::Error {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
         }
         let rootfs = &spec.rootfs;
-        std::fs::create_dir_all(rootfs.join("dev"))?;
+        at(std::fs::create_dir_all(rootfs.join("dev")), "create", &rootfs.join("dev"))?;
         bind_dev(rootfs, "urandom")?;
         // Not required by lite, but some Android code paths open it.
         let _ = bind_dev(rootfs, "null");
 
-        std::fs::create_dir_all(rootfs.join("proc"))?;
+        at(std::fs::create_dir_all(rootfs.join("proc")), "create", &rootfs.join("proc"))?;
         let proc_dst = cstr(&rootfs.join("proc"))?;
         check(
             unsafe {
@@ -149,6 +183,10 @@ pub fn run(spec: &SandboxSpec) -> io::Result<i32> {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "privileged sandbox needs root"));
         }
     } else {
+        if let Some(problem) = rootless_problem(&spec.rootfs) {
+            let hint = if has_cap_sys_admin() { " (or pass --privileged)" } else { "" };
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{problem}{hint}")));
+        }
         flags |= libc::CLONE_NEWUSER;
     }
     check(unsafe { libc::unshare(flags) }, "unshare")?;

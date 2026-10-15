@@ -57,6 +57,10 @@ The guest contract (fw_cfg arguments, data disk, shutdown) is described in
 | `sandbox-privileged` | Linux host as root | same, without a user namespace |
 
 `--runtime auto` picks `direct` when `/system/bin/lite` exists, else `sandbox`.
+When the rootless sandbox cannot write to `rootfs/` (it is owned by another
+uid, which only the host uid is mapped to) and the agent runs as root, it
+falls back to `sandbox-privileged` with a warning; as non-root it refuses to
+start and prints the `chown` command to run.
 
 ### State layout
 

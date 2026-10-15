@@ -62,8 +62,10 @@ jobs:
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j"$(nproc)"
-      # A tarball keeps permissions (artifacts do not).
-      - run: tar czf rootfs.tar.gz rootfs
+      # A tarball keeps permissions (artifacts do not). Owner 0 so unpacking
+      # as root does not leave files owned by the runner's uid; non-root
+      # users get their own uid either way.
+      - run: tar czf rootfs.tar.gz --owner=0 --group=0 --numeric-owner rootfs
       - uses: actions/upload-artifact@v7
         with:
           name: lite-rootfs
@@ -215,7 +217,9 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             7z a -tzip "$PKG.zip" "$PKG" > /dev/null
           else
-            tar czf "$PKG.tar.gz" "$PKG"
+            OWNER=()  # GNU tar only; the rootfs ships in the Linux package
+            [[ "${{ runner.os }}" == "Linux" ]] && OWNER=(--owner=0 --group=0 --numeric-owner)
+            tar czf "$PKG.tar.gz" "${OWNER[@]}" "$PKG"
           fi
       - uses: actions/upload-artifact@v7
         with:
@@ -262,7 +266,7 @@ jobs:
           cp target/aarch64-linux-android/release/wrapper dist/
           cp README.md LICENSE dist/
           PKG="wrapper-$PKG_VERSION-android-aarch64"
-          tar czf "$PKG.tar.gz" --transform "s,^dist,$PKG," dist
+          tar czf "$PKG.tar.gz" --owner=0 --group=0 --numeric-owner --transform "s,^dist,$PKG," dist
       - uses: actions/upload-artifact@v7
         with:
           name: wrapper-android-aarch64

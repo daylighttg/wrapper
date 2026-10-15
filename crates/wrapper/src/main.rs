@@ -288,10 +288,29 @@ fn resolve_runtime(args: &AgentArgs) -> anyhow::Result<(LiteRuntime, Layout)> {
             let rootfs = std::fs::canonicalize(&rootfs).with_context(|| format!("rootfs {}", rootfs.display()))?;
             let helper = std::env::current_exe().context("cannot locate own executable")?;
             let layout = Layout { state_dir: rootfs.join("data"), lite_root: "/data".into() };
-            let privileged = kind == RuntimeKind::SandboxPrivileged;
+            let privileged = kind == RuntimeKind::SandboxPrivileged || rootless_needs_privileged(&rootfs)?;
             (LiteRuntime::Sandbox { helper, rootfs, privileged }, layout)
         }
     })
+}
+
+/// Whether the rootless sandbox cannot write to `rootfs` but root can: fall
+/// back to the privileged one instead of failing every lite start with EACCES.
+#[cfg(target_os = "linux")]
+fn rootless_needs_privileged(rootfs: &Path) -> anyhow::Result<bool> {
+    let Some(problem) = wrapper_agent::sandbox::rootless_problem(rootfs) else {
+        return Ok(false);
+    };
+    if !wrapper_agent::sandbox::can_run_privileged() {
+        bail!("{problem}");
+    }
+    tracing::warn!("{problem}; using the privileged sandbox instead");
+    Ok(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rootless_needs_privileged(_rootfs: &Path) -> anyhow::Result<bool> {
+    Ok(false)
 }
 
 async fn run_agent(args: AgentArgs) -> anyhow::Result<()> {
