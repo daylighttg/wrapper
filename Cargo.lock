@@ -1887,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "wrapper"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1904,7 +1904,7 @@ dependencies = [
 
 [[package]]
 name = "wrapper-agent"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "wrapper-host"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "anyhow",
  "axum",
